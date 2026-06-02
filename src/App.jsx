@@ -1292,7 +1292,7 @@ function App() {
               <h3>{statusMessage}</h3>
             </div>
 
-            <div className="game-board">
+            <div className={`game-board active-turn-${activeMark.toLowerCase()}`}>
               {board.map((cell, idx) => {
                 const isSelected = selectedPieceIndex === idx;
                 const isPossibleTarget = selectedPieceIndex !== null && cell === null;
