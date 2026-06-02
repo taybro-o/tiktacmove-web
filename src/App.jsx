@@ -458,6 +458,7 @@ function App() {
     setInQueue(true);
     setPrivateLobbyActive(false);
     hasPostedStatsRef.current = false;
+    hasActiveConnectionRef.current = false;
     
     try {
       const { Peer } = await import('peerjs');
@@ -498,6 +499,7 @@ function App() {
                   const connectionTimeout = setTimeout(() => {
                     tempConn.close();
                     triedPeerIds.add(currentQueue.peerId);
+                    hasActiveConnectionRef.current = false;
                     becomeHost();
                   }, 10000);
 
@@ -516,6 +518,7 @@ function App() {
                     clearTimeout(connectionTimeout);
                     tempConn.close();
                     triedPeerIds.add(currentQueue.peerId);
+                    hasActiveConnectionRef.current = false;
                     becomeHost();
                   });
                   return; // Don't push our queue since we yielded
@@ -573,6 +576,7 @@ function App() {
                   console.log("Connection to host timed out, retrying...");
                   connected = true;
                   tempConn.close();
+                  hasActiveConnectionRef.current = false;
                   await attemptConnectionOrHost();
                 }
               }, 10000);
@@ -597,6 +601,7 @@ function App() {
                   connected = true;
                   clearTimeout(connectionTimeout);
                   tempConn.close();
+                  hasActiveConnectionRef.current = false;
                   await attemptConnectionOrHost();
                 }
               });
