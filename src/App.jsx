@@ -528,8 +528,7 @@ function App() {
               setupFirebaseGameListener(gid, 'client');
               setOnlineStatus('connected');
 
-              // Wait for host to write initial state (host does this when they detect the claim)
-              remove(hostEntryRef);
+              // Host cleans up their own queue entry when they detect the claim
               return;
             }
           } catch(e) {
