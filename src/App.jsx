@@ -463,7 +463,15 @@ function App() {
     
     try {
       const { Peer } = await import('peerjs');
-      const newPeer = new Peer();
+      const newPeer = new Peer(undefined, {
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }
+          ]
+        }
+      })
       
       newPeer.on('open', async (id) => {
         setPeerId(id);
@@ -666,7 +674,15 @@ function App() {
     
     try {
       const { Peer } = await import('peerjs');
-      const newPeer = new Peer();
+      const newPeer = new Peer(undefined, {
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }
+          ]
+        }
+      })
       
       newPeer.on('open', async (id) => {
         const shortCode = Math.random().toString(36).substring(2, 7).toUpperCase();
@@ -722,7 +738,15 @@ function App() {
       const actualPeerId = hostData.hostPeerId;
       
       const { Peer } = await import('peerjs');
-      const newPeer = new Peer();
+      const newPeer = new Peer(undefined, {
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }
+          ]
+        }
+      })
       
       newPeer.on('open', (id) => {
         setPeerId(id);
