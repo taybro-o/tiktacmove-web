@@ -32,13 +32,20 @@ import { db } from './firebase';
 // Public Shared Free JSON Bins on ExtendsClass
 const LEADERBOARD_BIN = 'https://extendsclass.com/api/json-storage/bin/fbbaaad';
 
-// Firebase RTDB stores arrays as objects with numeric keys and strips nulls.
-// Convert back to a proper 9-element array for the board.
+// Firebase RTDB strips trailing nulls from arrays. A 9-element board like
+// ["O",null,"X",null,"X",null,null,null,null] comes back as ["O",null,"X",null,"X"]
+// Only 5 elements! This breaks board[5+], making cells unclickable.
+// Always pad back to exactly 9 elements.
+const BOARD_SIZE = 9;
 const boardFromFirebase = (data) => {
-  if (!data) return Array(9).fill(null);
-  if (Array.isArray(data)) return data;
-  const result = Array(9).fill(null);
-  for (let i = 0; i < 9; i++) {
+  if (!data) return Array(BOARD_SIZE).fill(null);
+  if (Array.isArray(data)) {
+    while (data.length < BOARD_SIZE) data.push(null);
+    return data.slice(0, BOARD_SIZE);
+  }
+  // Object with numeric keys (Firebase stores sparse arrays this way)
+  const result = Array(BOARD_SIZE).fill(null);
+  for (let i = 0; i < BOARD_SIZE; i++) {
     if (data[i] !== undefined) result[i] = data[i];
   }
   return result;
