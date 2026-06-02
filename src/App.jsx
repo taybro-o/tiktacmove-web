@@ -470,17 +470,18 @@ function App() {
         
         let foundHost = null;
         try {
-          const queueRef = query(ref(db, 'queue'), orderByChild('timestamp'), limitToFirst(1));
+          const queueRef = ref(db, 'queue');
           const snapshot = await get(queueRef);
           
           if (snapshot.exists()) {
             const queueData = snapshot.val();
-            const hostKey = Object.keys(queueData)[0];
-            const hostData = queueData[hostKey];
-            
-            // Allow if less than 2 mins old and not claimed
-            if (Date.now() - hostData.timestamp < 120000 && !hostData.claimedBy) {
-              foundHost = { key: hostKey, data: hostData };
+            // Find the first host that is not claimed
+            for (const hostKey in queueData) {
+              const hostData = queueData[hostKey];
+              if (!hostData.claimedBy) {
+                foundHost = { key: hostKey, data: hostData };
+                break;
+              }
             }
           }
         } catch (e) {
