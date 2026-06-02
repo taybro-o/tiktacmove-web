@@ -16,9 +16,14 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Disable Vercel CDN caching so polling works in realtime
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     if (req.method === 'GET') {
       const response = await fetch(BIN_URL + '?nocache=' + Date.now(), {
-        headers: { 'Cache-Control': 'no-cache' }
+        headers: { 'Cache-Control': 'no-store' }
       });
       const rawData = await response.json();
       let parsedQueue = null;
