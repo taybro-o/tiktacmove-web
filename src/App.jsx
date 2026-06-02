@@ -51,7 +51,7 @@ function App() {
   const [p1, setP1] = useState({ name: 'Player 1', mark: 'X', penaltyCount: 0 });
   const [p2, setP2] = useState({ name: 'Player 2', mark: 'O', penaltyCount: 0 });
   const [selectedPieceIndex, setSelectedPieceIndex] = useState(null);
-  const [twiceTurn, setTwiceTurn] = useState(false);
+  const [twiceTurn, setTwiceTurn] = useState(null); // 'X' or 'O' or null
   const [showTwiceTurnPrompt, setShowTwiceTurnPrompt] = useState(false);
   const [winner, setWinner] = useState(null); // 'X', 'O', 'draw', null
   const [roundLog, setRoundLog] = useState([]);
@@ -204,7 +204,13 @@ function App() {
           playSound('win');
           nextLog.push({ text: `🏆 CyberAI has won the game!`, type: 'success' });
         } else {
-          nextMoveCount += 1;
+          if (nextTwiceTurn === 'O') {
+            nextMoveCount += 2;
+            nextTwiceTurn = null;
+            nextLog.push({ text: `⚡ CyberAI ACCEPTED the skip! ${p1.name}'s turn is skipped.`, type: 'info' });
+          } else {
+            nextMoveCount += 1;
+          }
           if (nextMoveCount === 6) {
             nextLog.push({ text: 'Phase 2: Advance Phase! Slide your existing 3 pieces.', type: 'info' });
           }
@@ -214,6 +220,7 @@ function App() {
         setMoveCount(nextMoveCount);
         setWinner(nextWinner);
         setRoundLog(nextLog);
+        setTwiceTurn(nextTwiceTurn);
       } 
       else if (aiMove.type === 'move') {
         const { from, to, isIllegal } = aiMove;
@@ -232,13 +239,20 @@ function App() {
             playSound('win');
             nextLog.push({ text: `🏆 CyberAI has won the game!`, type: 'success' });
           } else {
-            nextMoveCount += 1;
+            if (nextTwiceTurn === 'O') {
+              nextMoveCount += 2;
+              nextTwiceTurn = null;
+              nextLog.push({ text: `⚡ CyberAI ACCEPTED the skip! ${p1.name}'s turn is skipped.`, type: 'info' });
+            } else {
+              nextMoveCount += 1;
+            }
           }
 
           setBoard(nextBoard);
           setMoveCount(nextMoveCount);
           setWinner(nextWinner);
           setRoundLog(nextLog);
+          setTwiceTurn(nextTwiceTurn);
         } 
         else {
           // Illegal move fallback (penalized)
@@ -250,7 +264,7 @@ function App() {
           });
 
           if (nextP2.penaltyCount === 2) {
-            nextTwiceTurn = true;
+            nextTwiceTurn = 'X';
             nextP2.penaltyCount = 0;
             nextLog.push({ 
               text: `🚨 PENALTY MAXED! You hold the option to skip CyberAI's next turn!`, 
@@ -258,21 +272,13 @@ function App() {
             });
           }
 
-          // Only increment moveCount if twiceTurn was NOT just triggered.
-          // handleTwiceTurnChoice will handle the increment when the player decides.
-          if (!nextTwiceTurn) {
-            nextMoveCount += 1;
-          }
+          nextMoveCount += 1;
 
           setBoard(nextBoard);
           setMoveCount(nextMoveCount);
           setP2(nextP2);
           setTwiceTurn(nextTwiceTurn);
           setRoundLog(nextLog);
-
-          if (nextTwiceTurn) {
-            setShowTwiceTurnPrompt(true);
-          }
         }
       }
 
@@ -740,7 +746,7 @@ function App() {
     setP1({ name: username || 'Player 1', mark: 'X', penaltyCount: 0 });
     setP2({ name: 'Player 2', mark: 'O', penaltyCount: 0 });
     setSelectedPieceIndex(null);
-    setTwiceTurn(false);
+    setTwiceTurn(null);
     setWinner(null);
     setRoundLog([{ text: 'Game started! Phase 1: Placement.', type: 'info' }]);
     setGameMode('vs-local');
@@ -753,7 +759,7 @@ function App() {
     setP1({ name: username || 'You', mark: 'X', penaltyCount: 0 });
     setP2({ name: 'CyberAI', mark: 'O', penaltyCount: 0 });
     setSelectedPieceIndex(null);
-    setTwiceTurn(false);
+    setTwiceTurn(null);
     setWinner(null);
     setRoundLog([{ text: 'VS AI Game started! Defeat the CyberAI.', type: 'info' }]);
     setGameMode('vs-ai');
@@ -857,7 +863,7 @@ function App() {
               return;
             }
 
-            if (twiceTurn) {
+            if (twiceTurn === activeMark) {
               setBoard(nextBoard);
               setRoundLog(nextLog);
               setWinner(nextWinner);
@@ -891,7 +897,7 @@ function App() {
             });
 
             if (currentPenCount === 2) {
-              nextTwiceTurn = true;
+              nextTwiceTurn = activeMark === 'X' ? 'O' : 'X';
               if (activeMark === 'X') nextP1.penaltyCount = 0;
               else nextP2.penaltyCount = 0;
               
@@ -901,11 +907,7 @@ function App() {
               });
             }
 
-            // Only increment moveCount if twiceTurn was NOT just triggered.
-            // handleTwiceTurnChoice will handle the increment when the opponent decides.
-            if (!nextTwiceTurn) {
-              nextMoveCount += 1;
-            }
+            nextMoveCount += 1;
             setSelectedPieceIndex(null);
             
             setBoard(nextBoard);
@@ -914,11 +916,6 @@ function App() {
             setP2(nextP2);
             setTwiceTurn(nextTwiceTurn);
             setRoundLog(nextLog);
-            
-            if (nextTwiceTurn) {
-              setShowTwiceTurnPrompt(true);
-              return;
-            }
             
             syncStateToPeer(nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog);
           }
@@ -942,7 +939,7 @@ function App() {
     }
 
     setMoveCount(nextMoveCount);
-    setTwiceTurn(false);
+    setTwiceTurn(null);
     setShowTwiceTurnPrompt(false);
     setRoundLog(nextLog);
 
@@ -954,7 +951,7 @@ function App() {
           moveCount: nextMoveCount,
           p1: p1,
           p2: p2,
-          twiceTurn: false,
+          twiceTurn: null,
           winner: winner,
           roundLog: nextLog
         }
@@ -966,7 +963,7 @@ function App() {
     setBoard(Array(9).fill(null));
     setMoveCount(0);
     setSelectedPieceIndex(null);
-    setTwiceTurn(false);
+    setTwiceTurn(null);
     setShowTwiceTurnPrompt(false);
     setWinner(null);
     setRoundLog([{ text: 'Rematch started! Phase 1: Placement.', type: 'info' }]);
@@ -1013,7 +1010,7 @@ function App() {
     setBoard(Array(9).fill(null));
     setMoveCount(0);
     setSelectedPieceIndex(null);
-    setTwiceTurn(false);
+    setTwiceTurn(null);
     setWinner(null);
     setRoundLog([]);
     setOnlineRole('');
