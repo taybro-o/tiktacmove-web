@@ -420,6 +420,7 @@ function App() {
       setP2(data.p2 || { name: 'Player 2', mark: 'O', penaltyCount: 0 });
       setTwiceTurn(data.twiceTurn || null);
       setWinner(data.winner || null);
+      console.log(`[FB_RECV] role=${myRole} lastBy=${data.lastMoveByRole} moves=${data.moveCount} board=${JSON.stringify(data.board)} p1=${data.p1?.name} p2=${data.p2?.name}`);
       setRoundLog(data.roundLog || []);
 
       // Transition to game screen from lobby (client receives initial state)
@@ -854,9 +855,11 @@ function App() {
 
   // ==================== CELL CLICK ACTIONS ====================
   const handleCellClick = (index) => {
+    console.log(`[CLICK] mode=${gameMode} role=${onlineRole} mark=${activeMark} moves=${moveCount} board=${JSON.stringify(board)} winner=${winner}`);
     if (winner) return;
     
     if (gameMode === 'vs-online') {
+      console.log(`[TURN] host blocked? ${onlineRole === 'host' && activeMark === 'O'} | client blocked? ${onlineRole === 'client' && activeMark === 'X'}`);
       if (onlineRole === 'host' && activeMark === 'O') return;
       if (onlineRole === 'client' && activeMark === 'X') return;
     }
