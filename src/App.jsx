@@ -486,8 +486,8 @@ function App() {
         };
 
         try {
-          // Fetch current matchmaking queue
-          const res = await fetch(MATCHMAKING_BIN);
+          // Fetch current matchmaking queue with cache-busting to bypass CDN & browser cache
+          const res = await fetch(`${MATCHMAKING_BIN}?nocache=${Date.now()}`, { cache: 'no-store' });
           const data = await res.json();
           const activeQueue = data.queue;
           
@@ -661,11 +661,12 @@ function App() {
   const handleIncomingData = (data) => {
     if (data.type === 'INIT_GAME') {
       setP1({ name: data.p1Name, mark: 'X', penaltyCount: 0 });
-      setP2({ name: username, mark: 'O', penaltyCount: 0 });
-      setRoundLog([{ text: `🎮 Connected! Host: ${data.p1Name} (X). Client: ${username} (O)`, type: 'info' }]);
+      setP2({ name: username || 'Guest', mark: 'O', penaltyCount: 0 });
+      setRoundLog([{ text: `🎮 Connected! Host: ${data.p1Name} (X). Client: ${username || 'Guest'} (O)`, type: 'info' }]);
       setGameMode('vs-online'); // Synchronously start game screen for guest!
     }
     else if (data.type === 'JOIN_GAME') {
+      setP1({ name: username || 'Host', mark: 'X', penaltyCount: 0 });
       setP2({ name: data.p2Name, mark: 'O', penaltyCount: 0 });
       setRoundLog(prev => [...prev, { text: `🎮 Connected! Client: ${data.p2Name} (O) joined.`, type: 'info' }]);
       setGameMode('vs-online'); // Synchronously start game screen for host!
