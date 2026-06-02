@@ -502,6 +502,9 @@ function App() {
             let connected = false;
             const tempConn = newPeer.connect(activeQueue.peerId);
             
+            // Set up connection listeners immediately to avoid race conditions (like missing INIT_GAME)
+            setupConnection(tempConn, 'client');
+            
             const connectionTimeout = setTimeout(async () => {
               if (!connected) {
                 console.log("Connection to host timed out, becoming host instead...");
@@ -522,8 +525,6 @@ function App() {
                   body: JSON.stringify({ queue: null })
                 });
               } catch (e) {}
-              
-              setupConnection(tempConn, 'client');
             });
 
             tempConn.on('error', async (err) => {
