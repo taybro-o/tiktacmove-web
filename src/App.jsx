@@ -26,10 +26,11 @@ import {
   SIZE 
 } from './gameLogic';
 import './App.css';
+import { ref, get, set, runTransaction, onDisconnect, remove, query, orderByChild, limitToFirst } from 'firebase/database';
+import { db } from './firebase';
 
 // Public Shared Free JSON Bins on ExtendsClass
 const LEADERBOARD_BIN = 'https://extendsclass.com/api/json-storage/bin/fbbaaad';
-const MATCHMAKING_BIN = '/api/matchmaking';
 
 function App() {
   // ==================== CACHED USERNAME & STATS ====================
@@ -86,7 +87,6 @@ function App() {
   // Refs
   const logEndRef = useRef(null);
   const chatEndRef = useRef(null);
-  const matchmakingIntervalRef = useRef(null);
   const hasPostedStatsRef = useRef(false);
   const aiThinkingRef = useRef(false);
   const gameModeRef = useRef(gameMode);
@@ -451,7 +451,7 @@ function App() {
     });
   };
 
-  // ==================== INSTANT MATCHMAKING QUEUE ====================
+  // ==================== INSTANT MATCHMAKING QUEUE (FIREBASE RTDB) ====================
   const startQuickMatch = async () => {
     playSound('click');
     setOnlineStatus('connecting');
@@ -468,154 +468,65 @@ function App() {
         setPeerId(id);
         setPeer(newPeer);
         
-        let isHosting = false;
-        const triedPeerIds = new Set();
-        
-        const becomeHost = async () => {
-          isHosting = true;
-          setOnlineStatus('waiting');
-
-          const checkAndPushQueue = async () => {
-            if (!isHosting) return;
-            try {
-              const res = await fetch(`${MATCHMAKING_BIN}?nocache=${Date.now()}`, { cache: 'no-store' });
-              const resJson = await res.json();
-              const currentQueue = resJson.data?.queue;
-
-              const now = Date.now();
-              const isValidHost = currentQueue && currentQueue.peerId !== id && Math.abs(now - currentQueue.timestamp) < 300000 && !triedPeerIds.has(currentQueue.peerId);
-
-              if (isValidHost) {
-                // Tie-breaking: only the peer with the lexicographically smaller ID yields.
-                // This completely prevents cross-yielding deadlocks where two stranded hosts yield to each other.
-                if (id < currentQueue.peerId) {
-                  console.log("Yielding to concurrent host:", currentQueue.peerId);
-                  isHosting = false;
-                  if (matchmakingIntervalRef.current) clearInterval(matchmakingIntervalRef.current);
-
-                  const tempConn = newPeer.connect(currentQueue.peerId);
-                  setupConnection(tempConn, 'client');
-
-                  const connectionTimeout = setTimeout(() => {
-                    tempConn.close();
-                    triedPeerIds.add(currentQueue.peerId);
-                    hasActiveConnectionRef.current = false;
-                    becomeHost();
-                  }, 10000);
-
-                  tempConn.on('open', async () => {
-                    clearTimeout(connectionTimeout);
-                    try {
-                      await fetch(MATCHMAKING_BIN, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ data: { queue: null } })
-                      });
-                    } catch (e) {}
-                  });
-
-                  tempConn.on('error', () => {
-                    clearTimeout(connectionTimeout);
-                    tempConn.close();
-                    triedPeerIds.add(currentQueue.peerId);
-                    hasActiveConnectionRef.current = false;
-                    becomeHost();
-                  });
-                  return; // Don't push our queue since we yielded
-                } else {
-                  console.log("Concurrent host found, but we have higher priority. Staying host.");
-                }
-              }
-
-              // Either no concurrent host, or we have higher priority. Push our own queue to stay visible.
-              await fetch(MATCHMAKING_BIN, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  data: { queue: { peerId: id, name: username, timestamp: Date.now() } }
-                })
-              });
-            } catch (err) {
-              console.error("Queue check/push failed", err);
+        let foundHost = null;
+        try {
+          const queueRef = query(ref(db, 'queue'), orderByChild('timestamp'), limitToFirst(1));
+          const snapshot = await get(queueRef);
+          
+          if (snapshot.exists()) {
+            const queueData = snapshot.val();
+            const hostKey = Object.keys(queueData)[0];
+            const hostData = queueData[hostKey];
+            
+            // Allow if less than 2 mins old and not claimed
+            if (Date.now() - hostData.timestamp < 120000 && !hostData.claimedBy) {
+              foundHost = { key: hostKey, data: hostData };
             }
-          };
+          }
+        } catch (e) {
+          console.error("Queue fetch error", e);
+        }
 
-          // Check immediately, then poll every 10 seconds.
-          // This ensures stranded hosts will always eventually find each other.
-          await checkAndPushQueue();
-
-          if (matchmakingIntervalRef.current) clearInterval(matchmakingIntervalRef.current);
-          matchmakingIntervalRef.current = setInterval(checkAndPushQueue, 10000);
-
-          newPeer.on('connection', (connection) => {
-            isHosting = false;
-            if (matchmakingIntervalRef.current) clearInterval(matchmakingIntervalRef.current);
-            setupConnection(connection, 'host');
-          });
-        };
-
-        const attemptConnectionOrHost = async () => {
+        if (foundHost) {
+          // Attempt atomic claim
+          const hostRef = ref(db, `queue/${foundHost.key}`);
           try {
-            const res = await fetch(`${MATCHMAKING_BIN}?nocache=${Date.now()}`, { cache: 'no-store' });
-            const resJson = await res.json();
-            const activeQueue = resJson.data?.queue;
-            
-            const now = Date.now();
-            const isValidQueue = activeQueue && Math.abs(now - activeQueue.timestamp) < 300000 && activeQueue.peerId !== id && !triedPeerIds.has(activeQueue.peerId);
-            
-            if (isValidQueue) {
-              console.log("Found host in queue, attempting to connect:", activeQueue.peerId);
+            const { committed, snapshot: txSnapshot } = await runTransaction(hostRef, (currentData) => {
+              if (currentData === null) return null; // already deleted
+              if (currentData.claimedBy) return; // abort, already claimed
+              currentData.claimedBy = id;
+              return currentData;
+            });
+
+            if (committed && txSnapshot.val().claimedBy === id) {
+              console.log("Claimed host, attempting to connect:", foundHost.data.peerId);
               let connected = false;
-              triedPeerIds.add(activeQueue.peerId);
-              const tempConn = newPeer.connect(activeQueue.peerId);
-              
+              const tempConn = newPeer.connect(foundHost.data.peerId);
               setupConnection(tempConn, 'client');
               
-              const connectionTimeout = setTimeout(async () => {
-                if (!connected) {
-                  console.log("Connection to host timed out, retrying...");
-                  connected = true;
-                  tempConn.close();
-                  hasActiveConnectionRef.current = false;
-                  await attemptConnectionOrHost();
-                }
-              }, 10000);
-
-              tempConn.on('open', async () => {
-                if (connected) return;
-                connected = true;
-                clearTimeout(connectionTimeout);
-                
-                try {
-                  await fetch(MATCHMAKING_BIN, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ data: { queue: null } })
-                  });
-                } catch (e) {}
-              });
-
-              tempConn.on('error', async (err) => {
-                console.error("Match connection error:", err);
-                if (!connected) {
-                  connected = true;
-                  clearTimeout(connectionTimeout);
-                  tempConn.close();
-                  hasActiveConnectionRef.current = false;
-                  await attemptConnectionOrHost();
-                }
-              });
-              
-            } else {
-              await becomeHost();
+              remove(hostRef);
+              return;
             }
-          } catch (e) {
-            console.error("Queue query failed, falling back to hosting", e);
-            await becomeHost();
+          } catch(e) {
+            console.error("Transaction failed", e);
           }
-        };
+        }
 
-        await attemptConnectionOrHost();
+        // Become Host
+        setOnlineStatus('waiting');
+        const myQueueRef = ref(db, `queue/${id}`);
+        await set(myQueueRef, {
+          peerId: id,
+          name: username || 'Guest',
+          timestamp: Date.now()
+        });
+        
+        onDisconnect(myQueueRef).remove();
+
+        newPeer.on('connection', (connection) => {
+          setupConnection(connection, 'host');
+          remove(myQueueRef);
+        });
       });
       
       newPeer.on('error', (err) => {
@@ -634,18 +545,11 @@ function App() {
   const cancelMatchmaking = async () => {
     playSound('click');
     hasActiveConnectionRef.current = false;
-    if (matchmakingIntervalRef.current) {
-      clearInterval(matchmakingIntervalRef.current);
+    
+    if (peerId) {
+      remove(ref(db, `queue/${peerId}`));
     }
-    if (onlineRole === 'host') {
-      try {
-        await fetch(MATCHMAKING_BIN, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ data: { queue: null } })
-        });
-      } catch (e) {}
-    }
+    
     if (peer) {
       peer.destroy();
       setPeer(null);
@@ -665,32 +569,32 @@ function App() {
     
     try {
       const { Peer } = await import('peerjs');
-      const shortId = Math.random().toString(36).substring(2, 7).toUpperCase();
-      const newPeer = new Peer(shortId);
+      const newPeer = new Peer();
       
-      newPeer.on('open', (id) => {
-        setPeerId(id);
+      newPeer.on('open', async (id) => {
+        const shortCode = Math.random().toString(36).substring(2, 7).toUpperCase();
+        setPeerId(shortCode); // UI shows the short code
         setOnlineStatus('waiting');
         setPeer(newPeer);
-      });
-      
-      newPeer.on('connection', (connection) => {
-        setupConnection(connection, 'host');
+        
+        const roomRef = ref(db, `rooms/${shortCode}`);
+        await set(roomRef, {
+          hostPeerId: id,
+          hostName: username || 'Host',
+          timestamp: Date.now()
+        });
+        
+        onDisconnect(roomRef).remove();
+
+        newPeer.on('connection', (connection) => {
+          setupConnection(connection, 'host');
+          remove(roomRef);
+        });
       });
       
       newPeer.on('error', (err) => {
         console.error(err);
         setOnlineStatus('error');
-        // fallback to random dynamic PeerID
-        const fallbackPeer = new Peer();
-        fallbackPeer.on('open', (id) => {
-          setPeerId(id);
-          setOnlineStatus('waiting');
-          setPeer(fallbackPeer);
-        });
-        fallbackPeer.on('connection', (c) => {
-          setupConnection(c, 'host');
-        });
       });
       
     } catch (e) {
@@ -707,6 +611,18 @@ function App() {
     hasPostedStatsRef.current = false;
     
     try {
+      const roomCode = targetPeerId.trim().toUpperCase();
+      const snapshot = await get(ref(db, `rooms/${roomCode}`));
+      
+      if (!snapshot.exists()) {
+        setOnlineStatus('error');
+        alert('Room not found or expired.');
+        return;
+      }
+      
+      const hostData = snapshot.val();
+      const actualPeerId = hostData.hostPeerId;
+      
       const { Peer } = await import('peerjs');
       const newPeer = new Peer();
       
@@ -714,7 +630,7 @@ function App() {
         setPeerId(id);
         setPeer(newPeer);
         
-        const connection = newPeer.connect(targetPeerId.toUpperCase());
+        const connection = newPeer.connect(actualPeerId);
         setupConnection(connection, 'client');
       });
       
@@ -779,9 +695,6 @@ function App() {
     
     const activeMode = gameModeRef.current;
     if (activeMode === 'vs-online' || activeMode === 'setup-online') {
-      if (matchmakingIntervalRef.current) {
-        clearInterval(matchmakingIntervalRef.current);
-      }
       setOnlineStatus('disconnected');
       alert('Opponent disconnected or lobby closed.');
       handleBackToMenu();
@@ -1081,8 +994,9 @@ function App() {
   const handleBackToMenu = () => {
     playSound('click');
     hasActiveConnectionRef.current = false;
-    if (matchmakingIntervalRef.current) {
-      clearInterval(matchmakingIntervalRef.current);
+    if (peerId) {
+      remove(ref(db, `queue/${peerId}`));
+      remove(ref(db, `rooms/${peerId}`));
     }
     if (conn) {
       try {
