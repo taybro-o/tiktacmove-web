@@ -32,6 +32,18 @@ import { db } from './firebase';
 // Public Shared Free JSON Bins on ExtendsClass
 const LEADERBOARD_BIN = 'https://extendsclass.com/api/json-storage/bin/fbbaaad';
 
+// Firebase RTDB stores arrays as objects with numeric keys and strips nulls.
+// Convert back to a proper 9-element array for the board.
+const boardFromFirebase = (data) => {
+  if (!data) return Array(9).fill(null);
+  if (Array.isArray(data)) return data;
+  const result = Array(9).fill(null);
+  for (let i = 0; i < 9; i++) {
+    if (data[i] !== undefined) result[i] = data[i];
+  }
+  return result;
+};
+
 function App() {
   // ==================== CACHED USERNAME & STATS ====================
   const [username, setUsername] = useState(() => {
@@ -417,7 +429,7 @@ function App() {
         return;
       }
 
-      setBoard(data.board || Array(9).fill(null));
+      setBoard(boardFromFirebase(data.board));
       setMoveCount(data.moveCount || 0);
       setP1(data.p1 || { name: 'Player 1', mark: 'X', penaltyCount: 0 });
       setP2(data.p2 || { name: 'Player 2', mark: 'O', penaltyCount: 0 });
