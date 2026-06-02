@@ -26,7 +26,7 @@ import {
   SIZE 
 } from './gameLogic';
 import './App.css';
-import { ref, get, set, runTransaction, onDisconnect, remove, query, orderByChild, limitToFirst } from 'firebase/database';
+import { ref, get, set, runTransaction, onDisconnect, remove, query, orderByChild, limitToFirst, onValue, off } from 'firebase/database';
 import { db } from './firebase';
 
 // Public Shared Free JSON Bins on ExtendsClass
@@ -91,6 +91,7 @@ function App() {
   const aiThinkingRef = useRef(false);
   const gameModeRef = useRef(gameMode);
   const hasActiveConnectionRef = useRef(false);
+  const queueListenerRef = useRef(null); // stores { unsubscribe } for the queue watcher
 
   useEffect(() => {
     gameModeRef.current = gameMode;
@@ -468,19 +469,54 @@ function App() {
         setPeerId(id);
         setPeer(newPeer);
         
-        let foundHost = null;
+        // --- Step 1: Try to find and claim an existing host ---
+        let claimed = false;
         try {
           const queueRef = ref(db, 'queue');
           const snapshot = await get(queueRef);
           
           if (snapshot.exists()) {
             const queueData = snapshot.val();
-            // Find the first host that is not claimed
             for (const hostKey in queueData) {
               const hostData = queueData[hostKey];
-              if (!hostData.claimedBy) {
-                foundHost = { key: hostKey, data: hostData };
-                break;
+              if (hostData.claimedBy || hostKey === id) continue;
+              
+              // Attempt atomic claim via transaction
+              const hostEntryRef = ref(db, `queue/${hostKey}`);
+              try {
+                const { committed, snapshot: txSnapshot } = await runTransaction(hostEntryRef, (currentData) => {
+                  if (currentData === null) return null; // entry deleted
+                  if (currentData.claimedBy) return undefined; // abort — already claimed
+                  currentData.claimedBy = id;
+                  return currentData;
+                });
+
+                if (committed && txSnapshot.exists() && txSnapshot.val()?.claimedBy === id) {
+                  // Successfully claimed this host
+                  claimed = true;
+                  console.log("Claimed host, connecting to:", hostData.peerId);
+                  
+                  const tempConn = newPeer.connect(hostData.peerId);
+                  setupConnection(tempConn, 'client');
+                  
+                  // Set a timeout — if PeerJS can't connect in 10s, give up and become host
+                  const connectTimeout = setTimeout(() => {
+                    if (!hasActiveConnectionRef.current) {
+                      console.warn("Connection to claimed host timed out, becoming host instead.");
+                      try { tempConn.close(); } catch(e) {}
+                      remove(hostEntryRef);
+                      becomeHost(newPeer, id);
+                    }
+                  }, 10000);
+                  
+                  // Clear timeout once the connection actually opens
+                  tempConn.on('open', () => clearTimeout(connectTimeout));
+                  
+                  remove(hostEntryRef);
+                  return;
+                }
+              } catch(e) {
+                console.error("Transaction failed for host:", hostKey, e);
               }
             }
           }
@@ -488,52 +524,17 @@ function App() {
           console.error("Queue fetch error", e);
         }
 
-        if (foundHost) {
-          // Attempt atomic claim
-          const hostRef = ref(db, `queue/${foundHost.key}`);
-          try {
-            const { committed, snapshot: txSnapshot } = await runTransaction(hostRef, (currentData) => {
-              if (currentData === null) return null; // already deleted
-              if (currentData.claimedBy) return; // abort, already claimed
-              currentData.claimedBy = id;
-              return currentData;
-            });
-
-            if (committed && txSnapshot.val().claimedBy === id) {
-              console.log("Claimed host, attempting to connect:", foundHost.data.peerId);
-              let connected = false;
-              const tempConn = newPeer.connect(foundHost.data.peerId);
-              setupConnection(tempConn, 'client');
-              
-              remove(hostRef);
-              return;
-            }
-          } catch(e) {
-            console.error("Transaction failed", e);
-          }
+        // --- Step 2: No host found or claim failed — become host ourselves ---
+        if (!claimed) {
+          becomeHost(newPeer, id);
         }
-
-        // Become Host
-        setOnlineStatus('waiting');
-        const myQueueRef = ref(db, `queue/${id}`);
-        await set(myQueueRef, {
-          peerId: id,
-          name: username || 'Guest',
-          timestamp: Date.now()
-        });
-        
-        onDisconnect(myQueueRef).remove();
-
-        newPeer.on('connection', (connection) => {
-          setupConnection(connection, 'host');
-          remove(myQueueRef);
-        });
       });
       
       newPeer.on('error', (err) => {
         console.error("PeerJS peer error:", err);
         setOnlineStatus('error');
         setInQueue(false);
+        cleanupQueueListener();
       });
       
     } catch (e) {
@@ -543,9 +544,103 @@ function App() {
     }
   };
 
+  // Become a host: register in queue AND start a real-time listener to auto-connect if someone claims us
+  const becomeHost = async (peerInstance, myPeerId) => {
+    setOnlineStatus('waiting');
+    const myQueueRef = ref(db, `queue/${myPeerId}`);
+    
+    await set(myQueueRef, {
+      peerId: myPeerId,
+      name: username || 'Guest',
+      timestamp: Date.now()
+    });
+    
+    onDisconnect(myQueueRef).remove();
+
+    // Listen for incoming PeerJS connections (normal path)
+    peerInstance.on('connection', (connection) => {
+      setupConnection(connection, 'host');
+      remove(myQueueRef);
+      cleanupQueueListener();
+    });
+
+    // ALSO: start a real-time watcher on the entire queue.
+    // If another host appears (meaning someone else is also waiting),
+    // we won't do anything — but if OUR entry gets claimed, we know a client is connecting.
+    // More importantly: if we see an unclaimed entry from someone else, try to claim it.
+    // This handles the race where both players registered as hosts simultaneously.
+    const queueRef = ref(db, 'queue');
+    const unsubscribe = onValue(queueRef, async (snapshot) => {
+      // Don't act if we already have a connection
+      if (hasActiveConnectionRef.current) return;
+      
+      if (!snapshot.exists()) return;
+      const queueData = snapshot.val();
+      
+      for (const hostKey in queueData) {
+        const hostData = queueData[hostKey];
+        // Skip ourselves, skip already-claimed entries
+        if (hostKey === myPeerId || hostData.claimedBy) continue;
+        
+        // Found another unclaimed host — try to claim them (we act as client)
+        const otherHostRef = ref(db, `queue/${hostKey}`);
+        try {
+          const { committed, snapshot: txSnapshot } = await runTransaction(otherHostRef, (currentData) => {
+            if (currentData === null) return null;
+            if (currentData.claimedBy) return undefined; // abort
+            currentData.claimedBy = myPeerId;
+            return currentData;
+          });
+
+          if (committed && txSnapshot.exists() && txSnapshot.val()?.claimedBy === myPeerId) {
+            console.log("Queue watcher: claimed another host, connecting to:", hostData.peerId);
+            
+            // Remove our own queue entry since we're now a client
+            remove(myQueueRef);
+            cleanupQueueListener();
+            
+            const tempConn = peerInstance.connect(hostData.peerId);
+            setupConnection(tempConn, 'client');
+            
+            // Timeout for safety
+            const connectTimeout = setTimeout(() => {
+              if (!hasActiveConnectionRef.current) {
+                console.warn("Queue watcher: connection timed out.");
+                try { tempConn.close(); } catch(e) {}
+                // Re-register as host
+                becomeHost(peerInstance, myPeerId);
+              }
+            }, 10000);
+            
+            tempConn.on('open', () => clearTimeout(connectTimeout));
+            
+            remove(otherHostRef);
+            return;
+          }
+        } catch(e) {
+          console.error("Queue watcher transaction failed:", e);
+        }
+      }
+    });
+
+    // Store the unsubscribe function for cleanup
+    queueListenerRef.current = { unsubscribe, queueRef: myQueueRef };
+  };
+
+  // Helper: clean up queue listener
+  const cleanupQueueListener = () => {
+    if (queueListenerRef.current) {
+      try {
+        queueListenerRef.current.unsubscribe();
+      } catch(e) {}
+      queueListenerRef.current = null;
+    }
+  };
+
   const cancelMatchmaking = async () => {
     playSound('click');
     hasActiveConnectionRef.current = false;
+    cleanupQueueListener();
     
     if (peerId) {
       remove(ref(db, `queue/${peerId}`));
@@ -567,6 +662,7 @@ function App() {
     setOnlineStatus('connecting');
     setPrivateLobbyActive(true);
     hasPostedStatsRef.current = false;
+    hasActiveConnectionRef.current = false;
     
     try {
       const { Peer } = await import('peerjs');
@@ -610,6 +706,7 @@ function App() {
     setOnlineStatus('connecting');
     setPrivateLobbyActive(true);
     hasPostedStatsRef.current = false;
+    hasActiveConnectionRef.current = false;
     
     try {
       const roomCode = targetPeerId.trim().toUpperCase();
@@ -633,6 +730,20 @@ function App() {
         
         const connection = newPeer.connect(actualPeerId);
         setupConnection(connection, 'client');
+        
+        // Timeout if PeerJS can't reach the host
+        const connectTimeout = setTimeout(() => {
+          if (!hasActiveConnectionRef.current) {
+            setOnlineStatus('error');
+            alert('Connection timed out. The host may have left.');
+            try { connection.close(); } catch(e) {}
+            try { newPeer.destroy(); } catch(e) {}
+            setPeer(null);
+            setConn(null);
+          }
+        }, 10000);
+        
+        connection.on('open', () => clearTimeout(connectTimeout));
       });
       
       newPeer.on('error', (err) => {
@@ -995,6 +1106,7 @@ function App() {
   const handleBackToMenu = () => {
     playSound('click');
     hasActiveConnectionRef.current = false;
+    cleanupQueueListener();
     if (peerId) {
       remove(ref(db, `queue/${peerId}`));
       remove(ref(db, `rooms/${peerId}`));
