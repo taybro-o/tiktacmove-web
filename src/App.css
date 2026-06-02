@@ -1461,7 +1461,7 @@
   34% { transform: translate(31px, 1px) rotate(2deg); filter: drop-shadow(0 0 6px red) sepia(1) hue-rotate(-50deg); }
   36% { transform: translate(32px, -1px) rotate(-1deg); filter: drop-shadow(0 0 6px red) sepia(1) hue-rotate(-50deg); }
   38% { transform: translate(32px, 0px) rotate(0deg); filter: drop-shadow(0 0 6px red) sepia(1) hue-rotate(-50deg); }
-  48%, 90% { transform: translate(0, 0); filter: none; }
+  39%, 90% { transform: translate(0, 0); filter: none; }
 }
 
 .anim-error-glow {
@@ -1490,7 +1490,7 @@
   34% { transform: translate(79px, 41px) rotate(-2deg); filter: drop-shadow(0 0 6px red) sepia(1) hue-rotate(-50deg); }
   36% { transform: translate(80px, 39px) rotate(1deg); filter: drop-shadow(0 0 6px red) sepia(1) hue-rotate(-50deg); }
   38% { transform: translate(80px, 40px) rotate(0deg); filter: drop-shadow(0 0 6px red) sepia(1) hue-rotate(-50deg); }
-  48%, 90% { transform: translate(0, 0); filter: none; }
+  39%, 90% { transform: translate(0, 0); filter: none; }
 }
 
 /* ==================== ONLINE DASHBOARD & LEADERBOARD ==================== */

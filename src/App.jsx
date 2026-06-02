@@ -29,7 +29,7 @@ import './App.css';
 
 // Public Shared Free JSON Bins on ExtendsClass
 const LEADERBOARD_BIN = 'https://extendsclass.com/api/json-storage/bin/fbbaaad';
-const MATCHMAKING_BIN = 'https://extendsclass.com/api/json-storage/bin/baecbbc';
+const MATCHMAKING_BIN = 'https://api.restful-api.dev/objects/ff8081819d82fab6019e880f368a2d6b';
 
 function App() {
   // ==================== CACHED USERNAME & STATS ====================
@@ -441,110 +441,148 @@ function App() {
         setPeerId(id);
         setPeer(newPeer);
         
+        let isHosting = false;
+        const triedPeerIds = new Set();
+        
         const becomeHost = async () => {
-          try {
-            await fetch(MATCHMAKING_BIN, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                queue: {
-                  peerId: id,
-                  name: username,
-                  timestamp: Date.now()
-                }
-              })
-            });
-          } catch (e) {
-            console.error("Failed to write to queue", e);
-          }
-          
-          if (matchmakingIntervalRef.current) {
-            clearInterval(matchmakingIntervalRef.current);
-          }
-          matchmakingIntervalRef.current = setInterval(async () => {
+          isHosting = true;
+          setOnlineStatus('waiting');
+
+          const pushQueue = async () => {
             try {
               await fetch(MATCHMAKING_BIN, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                  queue: {
-                    peerId: id,
-                    name: username,
-                    timestamp: Date.now()
-                  }
+                  data: { queue: { peerId: id, name: username, timestamp: Date.now() } }
                 })
               });
-            } catch (err) {}
-          }, 4000);
-          
-          newPeer.on('connection', (connection) => {
-            if (matchmakingIntervalRef.current) {
-              clearInterval(matchmakingIntervalRef.current);
+            } catch (e) {
+              console.error("Failed to write to queue", e);
             }
+          };
+
+          await pushQueue();
+
+          // Check EXACTLY ONCE after 3.5 seconds to see if another Host was created concurrently
+          setTimeout(async () => {
+            if (!isHosting) return;
+            try {
+              const res = await fetch(`${MATCHMAKING_BIN}?nocache=${Date.now()}`, { cache: 'no-store' });
+              const resJson = await res.json();
+              const currentQueue = resJson.data?.queue;
+
+              const now = Date.now();
+              if (currentQueue && currentQueue.peerId !== id && Math.abs(now - currentQueue.timestamp) < 300000 && !triedPeerIds.has(currentQueue.peerId)) {
+                console.log("Yielding to concurrent host:", currentQueue.peerId);
+                isHosting = false;
+                if (matchmakingIntervalRef.current) clearInterval(matchmakingIntervalRef.current);
+
+                const tempConn = newPeer.connect(currentQueue.peerId);
+                setupConnection(tempConn, 'client');
+
+                const connectionTimeout = setTimeout(() => {
+                  tempConn.close();
+                  triedPeerIds.add(currentQueue.peerId);
+                  becomeHost();
+                }, 4000);
+
+                tempConn.on('open', async () => {
+                  clearTimeout(connectionTimeout);
+                  try {
+                    await fetch(MATCHMAKING_BIN, {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ data: { queue: null } })
+                    });
+                  } catch (e) {}
+                });
+
+                tempConn.on('error', () => {
+                  clearTimeout(connectionTimeout);
+                  tempConn.close();
+                  triedPeerIds.add(currentQueue.peerId);
+                  becomeHost();
+                });
+              }
+            } catch (err) {}
+          }, 3500);
+
+          if (matchmakingIntervalRef.current) clearInterval(matchmakingIntervalRef.current);
+          
+          // Refresh timestamp every 60 seconds (well under the 10 requests/min limit)
+          matchmakingIntervalRef.current = setInterval(async () => {
+            if (!isHosting) return;
+            await pushQueue();
+          }, 60000);
+
+          newPeer.on('connection', (connection) => {
+            isHosting = false;
+            if (matchmakingIntervalRef.current) clearInterval(matchmakingIntervalRef.current);
             setupConnection(connection, 'host');
           });
         };
 
-        try {
-          // Fetch current matchmaking queue with cache-busting to bypass CDN & browser cache
-          const res = await fetch(`${MATCHMAKING_BIN}?nocache=${Date.now()}`, { cache: 'no-store' });
-          const data = await res.json();
-          const activeQueue = data.queue;
-          
-          // Generous clock-drift protection: if a queue entry is newer than 5 minutes, we try to connect to it.
-          // If the connection fails or times out, we fall back to hosting!
-          const now = Date.now();
-          const isValidQueue = activeQueue && Math.abs(now - activeQueue.timestamp) < 300000;
-          
-          if (isValidQueue) {
-            // ================= CLIENT ROLE (FOUND HOST) =================
-            console.log("Found host in queue, attempting to connect:", activeQueue.peerId);
-            let connected = false;
-            const tempConn = newPeer.connect(activeQueue.peerId);
+        const attemptConnectionOrHost = async () => {
+          try {
+            const res = await fetch(`${MATCHMAKING_BIN}?nocache=${Date.now()}`, { cache: 'no-store' });
+            const resJson = await res.json();
+            const activeQueue = resJson.data?.queue;
             
-            // Set up connection listeners immediately to avoid race conditions (like missing INIT_GAME)
-            setupConnection(tempConn, 'client');
+            const now = Date.now();
+            const isValidQueue = activeQueue && Math.abs(now - activeQueue.timestamp) < 300000 && activeQueue.peerId !== id && !triedPeerIds.has(activeQueue.peerId);
             
-            const connectionTimeout = setTimeout(async () => {
-              if (!connected) {
-                console.log("Connection to host timed out, becoming host instead...");
-                tempConn.close();
-                await becomeHost();
-              }
-            }, 4500);
-
-            tempConn.on('open', async () => {
-              connected = true;
-              clearTimeout(connectionTimeout);
+            if (isValidQueue) {
+              console.log("Found host in queue, attempting to connect:", activeQueue.peerId);
+              let connected = false;
+              triedPeerIds.add(activeQueue.peerId);
+              const tempConn = newPeer.connect(activeQueue.peerId);
               
-              // Claim/clear the slot instantly so other players don't connect to it
-              try {
-                await fetch(MATCHMAKING_BIN, {
-                  method: 'PUT',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ queue: null })
-                });
-              } catch (e) {}
-            });
+              setupConnection(tempConn, 'client');
+              
+              const connectionTimeout = setTimeout(async () => {
+                if (!connected) {
+                  console.log("Connection to host timed out, retrying...");
+                  connected = true;
+                  tempConn.close();
+                  await attemptConnectionOrHost();
+                }
+              }, 4000);
 
-            tempConn.on('error', async (err) => {
-              console.error("Match connection error:", err);
-              if (!connected) {
+              tempConn.on('open', async () => {
+                if (connected) return;
                 connected = true;
                 clearTimeout(connectionTimeout);
-                tempConn.close();
-                await becomeHost();
-              }
-            });
-            
-          } else {
-            // ================= HOST ROLE (WAITING FOR PLAYER) =================
+                
+                try {
+                  await fetch(MATCHMAKING_BIN, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ data: { queue: null } })
+                  });
+                } catch (e) {}
+              });
+
+              tempConn.on('error', async (err) => {
+                console.error("Match connection error:", err);
+                if (!connected) {
+                  connected = true;
+                  clearTimeout(connectionTimeout);
+                  tempConn.close();
+                  await attemptConnectionOrHost();
+                }
+              });
+              
+            } else {
+              await becomeHost();
+            }
+          } catch (e) {
+            console.error("Queue query failed, falling back to hosting", e);
             await becomeHost();
           }
-        } catch (e) {
-          console.error("Queue query failed, falling back to hosting", e);
-          await becomeHost();
-        }
+        };
+
+        await attemptConnectionOrHost();
       });
       
       newPeer.on('error', (err) => {
@@ -570,7 +608,7 @@ function App() {
         await fetch(MATCHMAKING_BIN, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ queue: null })
+          body: JSON.stringify({ data: { queue: null } })
         });
       } catch (e) {}
     }
