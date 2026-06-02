@@ -89,6 +89,11 @@ function App() {
   const matchmakingIntervalRef = useRef(null);
   const hasPostedStatsRef = useRef(false);
   const aiThinkingRef = useRef(false);
+  const gameModeRef = useRef(gameMode);
+
+  useEffect(() => {
+    gameModeRef.current = gameMode;
+  }, [gameMode]);
 
   // First-time login / visitor check
   useEffect(() => {
@@ -106,9 +111,9 @@ function App() {
     }
   }, [gameMode]);
 
-  // Scroll triggers
+  // Scroll triggers (disabled log auto-scroll to prevent viewport jumping on smaller layouts)
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [roundLog]);
 
   useEffect(() => {
@@ -740,9 +745,24 @@ function App() {
     if (matchmakingIntervalRef.current) {
       clearInterval(matchmakingIntervalRef.current);
     }
-    setOnlineStatus('disconnected');
-    alert('Opponent disconnected or lobby closed.');
-    handleBackToMenu();
+    
+    const activeMode = gameModeRef.current;
+    if (activeMode === 'vs-online' || activeMode === 'setup-online') {
+      setOnlineStatus('disconnected');
+      alert('Opponent disconnected or lobby closed.');
+      handleBackToMenu();
+    } else {
+      // Silently clean up PeerJS states in background without interrupting local or VS AI games
+      setOnlineStatus('disconnected');
+      if (conn) {
+        try { conn.close(); } catch (e) {}
+        setConn(null);
+      }
+      if (peer) {
+        try { peer.destroy(); } catch (e) {}
+        setPeer(null);
+      }
+    }
   };
 
   const sendChatMessage = () => {
