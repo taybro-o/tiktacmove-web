@@ -411,15 +411,20 @@ function App() {
   const syncStateToFirebase = (nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog, role) => {
     if (!gameId) return;
     const fbRole = role || onlineRole;
-    console.log(`[FB_SEND] role=${fbRole} moves=${nextMoveCount} board=${JSON.stringify(nextBoard)} p1=${nextP1?.name} p2=${nextP2?.name}`);
+    // Ensure board is always exactly 9 elements — Firebase strips trailing nulls
+    const writeBoard = [...nextBoard];
+    while (writeBoard.length < BOARD_SIZE) writeBoard.push(null);
+    writeBoard.length = BOARD_SIZE;
+    const writeLog = Array.isArray(nextLog) ? [...nextLog] : [];
+    console.log(`[FB_SEND] role=${fbRole} moves=${nextMoveCount} board=${JSON.stringify(writeBoard)} p1=${nextP1?.name} p2=${nextP2?.name}`);
     set(ref(db, `games/${gameId}/state`), {
-      board: nextBoard,
+      board: writeBoard,
       moveCount: nextMoveCount,
       p1: nextP1,
       p2: nextP2,
       twiceTurn: nextTwiceTurn || null,
       winner: nextWinner || null,
-      roundLog: nextLog,
+      roundLog: writeLog,
       lastMoveByRole: fbRole,
       timestamp: Date.now()
     }).catch(e => console.error("Firebase sync error:", e));
