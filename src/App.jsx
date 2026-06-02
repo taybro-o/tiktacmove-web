@@ -69,10 +69,8 @@ function App() {
   const [loadingLeaderboard, setLoadingLeaderboard] = useState(false);
 
   // ==================== ONLINE MULTIPLAYER STATE ====================
-  const [peer, setPeer] = useState(null);
-  const [conn, setConn] = useState(null);
-  const [peerId, setPeerId] = useState('');
-  const [targetPeerId, setTargetPeerId] = useState('');
+  const [gameId, setGameId] = useState('');
+  const [roomCodeInput, setRoomCodeInput] = useState('');
   const [onlineRole, setOnlineRole] = useState(''); // host, client
   const [onlineStatus, setOnlineStatus] = useState('disconnected'); // disconnected, connecting, waiting, connected, error
   const [inQueue, setInQueue] = useState(false);
@@ -90,8 +88,9 @@ function App() {
   const hasPostedStatsRef = useRef(false);
   const aiThinkingRef = useRef(false);
   const gameModeRef = useRef(gameMode);
-  const hasActiveConnectionRef = useRef(false);
   const queueListenerRef = useRef(null); // stores { unsubscribe } for the queue watcher
+  const gameListenerRef = useRef(null); // stores unsubscribe for game state listener
+  const peerIdRef = useRef(''); // unique ID for this session (used in queue/game paths)
 
   useEffect(() => {
     gameModeRef.current = gameMode;
@@ -388,68 +387,88 @@ function App() {
     }
   }, [winner, gameMode]);
 
-  // ==================== UNIFIED PEERJS ENGINE ====================
-  const setupConnection = (connection, role) => {
-    // If the host is already connected to a player, reject any secondary clients attempting to join
-    if (role === 'host' && hasActiveConnectionRef.current) {
-      console.log("Rejecting concurrent client connection:", connection.peer);
-      try {
-        const sendReject = () => {
-          connection.send({ type: 'REJECTED', reason: 'LOBBY_FULL' });
-          setTimeout(() => { connection.close(); }, 500);
-        };
-        if (connection.open) {
-          sendReject();
-        } else {
-          connection.on('open', sendReject);
-        }
-      } catch (e) {
-        connection.close();
-      }
-      return;
-    }
+  // ==================== FIREBASE GAME RELAY ENGINE ====================
+  // Sync local game state to Firebase for the opponent to receive
+  const syncStateToFirebase = (nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog, role) => {
+    if (!gameId) return;
+    set(ref(db, `games/${gameId}/state`), {
+      board: nextBoard,
+      moveCount: nextMoveCount,
+      p1: nextP1,
+      p2: nextP2,
+      twiceTurn: nextTwiceTurn || null,
+      winner: nextWinner || null,
+      roundLog: nextLog,
+      lastMoveByRole: role || onlineRole,
+      timestamp: Date.now()
+    }).catch(e => console.error("Firebase sync error:", e));
+  };
 
-    hasActiveConnectionRef.current = true;
-    setConn(connection);
-    setOnlineRole(role);
-    setInQueue(false);
-    setPrivateLobbyActive(false);
+  // Listen for game state changes from opponent
+  const setupFirebaseGameListener = (gid, myRole) => {
+    cleanupGameListener();
+    const gameStateRef = ref(db, `games/${gid}/state`);
+    const unsubscribe = onValue(gameStateRef, (snapshot) => {
+      if (!snapshot.exists()) return;
+      const data = snapshot.val();
+      // Skip our own writes (same role wrote it)
+      if (data.lastMoveByRole === myRole) return;
 
-    const onOpen = () => {
-      setOnlineStatus('connected');
-      if (role === 'client') {
-        // Client reports JOIN_GAME to the waiting Host
-        connection.send({
-          type: 'JOIN_GAME',
-          p2Name: username
-        });
-      } else {
-        // Host greets the Client with INIT_GAME
-        connection.send({
-          type: 'INIT_GAME',
-          p1Name: username
-        });
+      setBoard(data.board || Array(9).fill(null));
+      setMoveCount(data.moveCount || 0);
+      setP1(data.p1 || { name: 'Player 1', mark: 'X', penaltyCount: 0 });
+      setP2(data.p2 || { name: 'Player 2', mark: 'O', penaltyCount: 0 });
+      setTwiceTurn(data.twiceTurn || null);
+      setWinner(data.winner || null);
+      setRoundLog(data.roundLog || []);
+
+      // Sound effects for new moves
+      if (data.roundLog && data.roundLog.length > 0) {
+        const lastLog = data.roundLog[data.roundLog.length - 1];
+        if (lastLog.text.includes('illegal')) playSound('penalty');
+        else if (lastLog.text.includes('won')) playSound('win');
+        else if (lastLog.text.includes('selected')) playSound('select');
+        else if (lastLog.text.includes('moved')) playSound('move');
+        else if (!lastLog.text.includes('Waiting')) playSound('click');
       }
+    });
+
+    gameListenerRef.current = unsubscribe;
+
+    // Listen for incoming chat messages
+    const chatRef = ref(db, `games/${gid}/chat`);
+    const chatUnsubscribe = onValue(chatRef, (snapshot) => {
+      if (!snapshot.exists()) return;
+      const data = snapshot.val();
+      if (data.sender && data.sender !== username) {
+        setChatMessages(prev => [...prev, { sender: 'them', text: data.text }]);
+      }
+    });
+
+    // Listen for play again signal
+    const playAgainRef = ref(db, `games/${gid}/playAgain`);
+    const playAgainUnsubscribe = onValue(playAgainRef, (snapshot) => {
+      if (!snapshot.exists()) return;
+      const data = snapshot.val();
+      if (data.triggered && data.by !== onlineRole) {
+        resetGameStates();
+        set(playAgainRef, null); // Clear the signal
+      }
+    });
+
+    // Store all unsubscribes
+    gameListenerRef.current = () => {
+      unsubscribe();
+      chatUnsubscribe();
+      playAgainUnsubscribe();
     };
+  };
 
-    if (connection.open) {
-      onOpen();
-    } else {
-      connection.on('open', onOpen);
+  const cleanupGameListener = () => {
+    if (gameListenerRef.current) {
+      try { gameListenerRef.current(); } catch(e) {}
+      gameListenerRef.current = null;
     }
-
-    connection.on('data', (data) => {
-      handleIncomingData(data);
-    });
-
-    connection.on('close', () => {
-      handleOnlineDisconnect();
-    });
-
-    connection.on('error', (err) => {
-      console.error("Connection channel error", err);
-      handleOnlineDisconnect();
-    });
   };
 
   // ==================== INSTANT MATCHMAKING QUEUE (FIREBASE RTDB) ====================
@@ -459,137 +478,132 @@ function App() {
     setInQueue(true);
     setPrivateLobbyActive(false);
     hasPostedStatsRef.current = false;
-    hasActiveConnectionRef.current = false;
-    
+
+    // Generate a unique session ID if we don't have one
+    if (!peerIdRef.current) {
+      peerIdRef.current = crypto.randomUUID();
+    }
+    const myId = peerIdRef.current;
+
+    // --- Step 1: Try to find and claim an existing host ---
+    let claimed = false;
     try {
-      const { Peer } = await import('peerjs');
-      const newPeer = new Peer(undefined, {
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }
-          ]
-        }
-      })
-      
-      newPeer.on('open', async (id) => {
-        setPeerId(id);
-        setPeer(newPeer);
-        
-        // --- Step 1: Try to find and claim an existing host ---
-        let claimed = false;
-        try {
-          const queueRef = ref(db, 'queue');
-          const snapshot = await get(queueRef);
-          
-          if (snapshot.exists()) {
-            const queueData = snapshot.val();
-            for (const hostKey in queueData) {
-              const hostData = queueData[hostKey];
-              if (hostData.claimedBy || hostKey === id) continue;
-              
-              // Attempt atomic claim via transaction
-              const hostEntryRef = ref(db, `queue/${hostKey}`);
-              try {
-                const { committed, snapshot: txSnapshot } = await runTransaction(hostEntryRef, (currentData) => {
-                  if (currentData === null) return null; // entry deleted
-                  if (currentData.claimedBy) return undefined; // abort — already claimed
-                  currentData.claimedBy = id;
-                  return currentData;
-                });
+      const queueRef = ref(db, 'queue');
+      const snapshot = await get(queueRef);
 
-                if (committed && txSnapshot.exists() && txSnapshot.val()?.claimedBy === id) {
-                  // Successfully claimed this host
-                  claimed = true;
-                  console.log("Claimed host, connecting to:", hostData.peerId);
-                  
-                  const tempConn = newPeer.connect(hostData.peerId);
-                  setupConnection(tempConn, 'client');
-                  
-                  // Set a timeout — if PeerJS can't connect in 10s, give up and become host
-                  const connectTimeout = setTimeout(() => {
-                    if (!hasActiveConnectionRef.current) {
-                      console.warn("Connection to claimed host timed out, becoming host instead.");
-                      try { tempConn.close(); } catch(e) {}
-                      remove(hostEntryRef);
-                      becomeHost(newPeer, id);
-                    }
-                  }, 10000);
-                  
-                  // Clear timeout once the connection actually opens
-                  tempConn.on('open', () => clearTimeout(connectTimeout));
-                  
-                  remove(hostEntryRef);
-                  return;
-                }
-              } catch(e) {
-                console.error("Transaction failed for host:", hostKey, e);
-              }
+      if (snapshot.exists()) {
+        const queueData = snapshot.val();
+        for (const hostKey in queueData) {
+          const hostData = queueData[hostKey];
+          if (hostData.claimedBy || hostKey === myId) continue;
+
+          // Attempt atomic claim via transaction — also store our name
+          const hostEntryRef = ref(db, `queue/${hostKey}`);
+          try {
+            const { committed, snapshot: txSnapshot } = await runTransaction(hostEntryRef, (currentData) => {
+              if (currentData === null) return null; // entry deleted
+              if (currentData.claimedBy) return undefined; // abort — already claimed
+              currentData.claimedBy = myId;
+              currentData.clientName = username || 'Guest';
+              return currentData;
+            });
+
+            if (committed && txSnapshot.exists() && txSnapshot.val()?.claimedBy === myId) {
+              // Successfully claimed this host
+              claimed = true;
+              console.log("Claimed host:", hostKey);
+              setOnlineRole('client');
+              setInQueue(false);
+
+              // Game ID = host's queue key
+              const gid = hostKey;
+              setGameId(gid);
+
+              // Set up Firebase listener for game state
+              setupFirebaseGameListener(gid, 'client');
+              setOnlineStatus('connected');
+
+              // Wait for host to write initial state (host does this when they detect the claim)
+              remove(hostEntryRef);
+              return;
             }
+          } catch(e) {
+            console.error("Transaction failed for host:", hostKey, e);
           }
-        } catch (e) {
-          console.error("Queue fetch error", e);
         }
-
-        // --- Step 2: No host found or claim failed — become host ourselves ---
-        if (!claimed) {
-          becomeHost(newPeer, id);
-        }
-      });
-      
-      newPeer.on('error', (err) => {
-        console.error("PeerJS peer error:", err);
-        setOnlineStatus('error');
-        setInQueue(false);
-        cleanupQueueListener();
-      });
-      
+      }
     } catch (e) {
-      console.error(e);
-      setOnlineStatus('error');
-      setInQueue(false);
+      console.error("Queue fetch error", e);
+    }
+
+    // --- Step 2: No host found or claim failed — become host ourselves ---
+    if (!claimed) {
+      becomeHost(myId);
     }
   };
 
   // Become a host: register in queue AND start a real-time listener to auto-connect if someone claims us
-  const becomeHost = async (peerInstance, myPeerId) => {
+  const becomeHost = async (myPeerId) => {
     setOnlineStatus('waiting');
+    setOnlineRole('host');
+    setInQueue(false);
+
     const myQueueRef = ref(db, `queue/${myPeerId}`);
-    
+
     await set(myQueueRef, {
       peerId: myPeerId,
       name: username || 'Guest',
       timestamp: Date.now()
     });
-    
+
     onDisconnect(myQueueRef).remove();
 
-    // Listen for incoming PeerJS connections (normal path)
-    peerInstance.on('connection', (connection) => {
-      setupConnection(connection, 'host');
-      remove(myQueueRef);
-      cleanupQueueListener();
-    });
-
-    // ALSO: start a real-time watcher on the entire queue.
-    // If another host appears (meaning someone else is also waiting),
-    // we won't do anything — but if OUR entry gets claimed, we know a client is connecting.
-    // More importantly: if we see an unclaimed entry from someone else, try to claim it.
+    // Start a real-time watcher on the entire queue.
+    // If our entry gets claimedBy set, a client is connecting to us.
+    // Also: if we see an unclaimed entry from someone else, try to claim it.
     // This handles the race where both players registered as hosts simultaneously.
     const queueRef = ref(db, 'queue');
     const unsubscribe = onValue(queueRef, async (snapshot) => {
-      // Don't act if we already have a connection
-      if (hasActiveConnectionRef.current) return;
-      
       if (!snapshot.exists()) return;
       const queueData = snapshot.val();
-      
+
+      // Check if OUR entry was claimed
+      const myEntry = queueData[myPeerId];
+      if (myEntry && myEntry.claimedBy && myEntry.clientName) {
+        // A client claimed us! Set up game with them.
+        cleanupQueueListener();
+        remove(myQueueRef);
+
+        const gid = myPeerId;
+        setGameId(gid);
+
+        // Set up Firebase listener
+        setupFirebaseGameListener(gid, 'host');
+        setOnlineStatus('connected');
+        setOnlineRole('host');
+
+        // Write initial game state with both player names
+        const initState = {
+          p1: { name: username || 'Host', mark: 'X', penaltyCount: 0 },
+          p2: { name: myEntry.clientName, mark: 'O', penaltyCount: 0 },
+          board: Array(9).fill(null),
+          moveCount: 0,
+          twiceTurn: null,
+          winner: null,
+          roundLog: [{ text: `🎮 Connected! Host: ${username || 'Host'} (X). Client: ${myEntry.clientName} (O)`, type: 'info' }],
+          lastMoveByRole: 'host',
+          timestamp: Date.now()
+        };
+
+        set(ref(db, `games/${gid}/state`), initState).catch(e => console.error("Firebase init error:", e));
+        return;
+      }
+
       for (const hostKey in queueData) {
         const hostData = queueData[hostKey];
         // Skip ourselves, skip already-claimed entries
         if (hostKey === myPeerId || hostData.claimedBy) continue;
-        
+
         // Found another unclaimed host — try to claim them (we act as client)
         const otherHostRef = ref(db, `queue/${hostKey}`);
         try {
@@ -597,32 +611,24 @@ function App() {
             if (currentData === null) return null;
             if (currentData.claimedBy) return undefined; // abort
             currentData.claimedBy = myPeerId;
+            currentData.clientName = username || 'Guest';
             return currentData;
           });
 
           if (committed && txSnapshot.exists() && txSnapshot.val()?.claimedBy === myPeerId) {
-            console.log("Queue watcher: claimed another host, connecting to:", hostData.peerId);
-            
+            console.log("Queue watcher: claimed another host:", hostKey);
+
             // Remove our own queue entry since we're now a client
             remove(myQueueRef);
             cleanupQueueListener();
-            
-            const tempConn = peerInstance.connect(hostData.peerId);
-            setupConnection(tempConn, 'client');
-            
-            // Timeout for safety
-            const connectTimeout = setTimeout(() => {
-              if (!hasActiveConnectionRef.current) {
-                console.warn("Queue watcher: connection timed out.");
-                try { tempConn.close(); } catch(e) {}
-                // Re-register as host
-                becomeHost(peerInstance, myPeerId);
-              }
-            }, 10000);
-            
-            tempConn.on('open', () => clearTimeout(connectTimeout));
-            
-            remove(otherHostRef);
+
+            const gid = hostKey;
+            setGameId(gid);
+            setOnlineRole('client');
+
+            // Set up Firebase listener
+            setupFirebaseGameListener(gid, 'client');
+            setOnlineStatus('connected');
             return;
           }
         } catch(e) {
@@ -647,21 +653,23 @@ function App() {
 
   const cancelMatchmaking = async () => {
     playSound('click');
-    hasActiveConnectionRef.current = false;
     cleanupQueueListener();
-    
-    if (peerId) {
-      remove(ref(db, `queue/${peerId}`));
+    cleanupGameListener();
+
+    if (peerIdRef.current) {
+      remove(ref(db, `queue/${peerIdRef.current}`));
     }
-    
-    if (peer) {
-      peer.destroy();
-      setPeer(null);
-      setConn(null);
+
+    if (gameId) {
+      remove(ref(db, `games/${gameId}/state`));
     }
+
+    setGameId('');
     setOnlineStatus('disconnected');
+    setOnlineRole('');
     setInQueue(false);
     setPrivateLobbyActive(false);
+    setChatMessages([]);
   };
 
   // ==================== PRIVATE ROOM SETUP FLOW ====================
@@ -670,46 +678,52 @@ function App() {
     setOnlineStatus('connecting');
     setPrivateLobbyActive(true);
     hasPostedStatsRef.current = false;
-    hasActiveConnectionRef.current = false;
-    
-    try {
-      const { Peer } = await import('peerjs');
-      const newPeer = new Peer(undefined, {
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }
-          ]
-        }
-      })
-      
-      newPeer.on('open', async (id) => {
-        const shortCode = Math.random().toString(36).substring(2, 7).toUpperCase();
-        setPeerId(shortCode); // UI shows the short code
-        setOnlineStatus('waiting');
-        setPeer(newPeer);
-        
-        const roomRef = ref(db, `rooms/${shortCode}`);
-        await set(roomRef, {
-          hostPeerId: id,
-          hostName: username || 'Host',
-          timestamp: Date.now()
-        });
-        
-        onDisconnect(roomRef).remove();
 
-        newPeer.on('connection', (connection) => {
-          setupConnection(connection, 'host');
+    try {
+      const shortCode = Math.random().toString(36).substring(2, 7).toUpperCase();
+      const gid = shortCode;
+      setGameId(gid); // UI shows the short code
+      setOnlineRole('host');
+      setOnlineStatus('waiting');
+
+      const roomRef = ref(db, `rooms/${shortCode}`);
+      await set(roomRef, {
+        hostName: username || 'Host',
+        timestamp: Date.now()
+      });
+
+      onDisconnect(roomRef).remove();
+
+      // Listen for client to join by writing clientName to the room entry
+      const unsubscribe = onValue(roomRef, (snapshot) => {
+        if (!snapshot.exists()) return;
+        const data = snapshot.val();
+        if (data.clientName) {
+          // Client has joined!
+          unsubscribe();
           remove(roomRef);
-        });
+
+          // Set up game listener
+          setupFirebaseGameListener(gid, 'host');
+          setOnlineStatus('connected');
+
+          // Write initial game state
+          const initState = {
+            p1: { name: username || 'Host', mark: 'X', penaltyCount: 0 },
+            p2: { name: data.clientName, mark: 'O', penaltyCount: 0 },
+            board: Array(9).fill(null),
+            moveCount: 0,
+            twiceTurn: null,
+            winner: null,
+            roundLog: [{ text: `🎮 Connected! Host: ${username || 'Host'} (X). Client: ${data.clientName} (O)`, type: 'info' }],
+            lastMoveByRole: 'host',
+            timestamp: Date.now()
+          };
+
+          set(ref(db, `games/${gid}/state`), initState).catch(e => console.error("Firebase init error:", e));
+        }
       });
-      
-      newPeer.on('error', (err) => {
-        console.error(err);
-        setOnlineStatus('error');
-      });
-      
+
     } catch (e) {
       console.error(e);
       setOnlineStatus('error');
@@ -717,161 +731,76 @@ function App() {
   };
 
   const joinPrivateLobby = async () => {
-    if (!targetPeerId.trim()) return alert('Please enter a Room Code');
+    if (!roomCodeInput.trim()) return alert('Please enter a Room Code');
     playSound('click');
     setOnlineStatus('connecting');
     setPrivateLobbyActive(true);
     hasPostedStatsRef.current = false;
-    hasActiveConnectionRef.current = false;
-    
+
     try {
-      const roomCode = targetPeerId.trim().toUpperCase();
+      const roomCode = roomCodeInput.trim().toUpperCase();
       const snapshot = await get(ref(db, `rooms/${roomCode}`));
-      
+
       if (!snapshot.exists()) {
         setOnlineStatus('error');
         alert('Room not found or expired.');
         return;
       }
-      
-      const hostData = snapshot.val();
-      const actualPeerId = hostData.hostPeerId;
-      
-      const { Peer } = await import('peerjs');
-      const newPeer = new Peer(undefined, {
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }
-          ]
-        }
-      })
-      
-      newPeer.on('open', (id) => {
-        setPeerId(id);
-        setPeer(newPeer);
-        
-        const connection = newPeer.connect(actualPeerId);
-        setupConnection(connection, 'client');
-        
-        // Timeout if PeerJS can't reach the host
-        const connectTimeout = setTimeout(() => {
-          if (!hasActiveConnectionRef.current) {
-            setOnlineStatus('error');
-            alert('Connection timed out. The host may have left.');
-            try { connection.close(); } catch(e) {}
-            try { newPeer.destroy(); } catch(e) {}
-            setPeer(null);
-            setConn(null);
-          }
-        }, 10000);
-        
-        connection.on('open', () => clearTimeout(connectTimeout));
-      });
-      
-      newPeer.on('error', (err) => {
-        console.error(err);
-        setOnlineStatus('error');
-        alert('Could not connect. Verify the Room Code.');
-      });
-      
+
+      const gid = roomCode;
+      setGameId(gid);
+      setOnlineRole('client');
+
+      // Tell the host we're joining by writing our name to the room entry
+      await set(ref(db, `rooms/${roomCode}/clientName`), username || 'Guest');
+
+      // Set up Firebase listener to receive game state
+      setupFirebaseGameListener(gid, 'client');
+      setOnlineStatus('connected');
+
     } catch (e) {
       console.error(e);
       setOnlineStatus('error');
     }
   };
 
-  // ==================== DATA SYNC AND MESSAGING ====================
-  const handleIncomingData = (data) => {
-    if (data.type === 'REJECTED') {
-      alert('This lobby is already full.');
-      handleBackToMenu();
-    }
-    else if (data.type === 'INIT_GAME') {
-      setP1({ name: data.p1Name, mark: 'X', penaltyCount: 0 });
-      setP2({ name: username || 'Guest', mark: 'O', penaltyCount: 0 });
-      setRoundLog([{ text: `🎮 Connected! Host: ${data.p1Name} (X). Client: ${username || 'Guest'} (O)`, type: 'info' }]);
-      setGameMode('vs-online'); // Synchronously start game screen for guest!
-    }
-    else if (data.type === 'JOIN_GAME') {
-      setP1({ name: username || 'Host', mark: 'X', penaltyCount: 0 });
-      setP2({ name: data.p2Name, mark: 'O', penaltyCount: 0 });
-      setRoundLog(prev => [...prev, { text: `🎮 Connected! Client: ${data.p2Name} (O) joined.`, type: 'info' }]);
-      setGameMode('vs-online'); // Synchronously start game screen for host!
-    }
-    else if (data.type === 'SYNC_STATE') {
-      setBoard(data.state.board);
-      setMoveCount(data.state.moveCount);
-      setP1(data.state.p1);
-      setP2(data.state.p2);
-      setTwiceTurn(data.state.twiceTurn);
-      setWinner(data.state.winner);
-      setRoundLog(data.state.roundLog);
-      
-      const lastLog = data.state.roundLog[data.state.roundLog.length - 1];
-      if (lastLog) {
-        if (lastLog.text.includes('illegal')) playSound('penalty');
-        else if (lastLog.text.includes('won')) playSound('win');
-        else if (lastLog.text.includes('selected')) playSound('select');
-        else if (lastLog.text.includes('moved')) playSound('move');
-        else playSound('click');
-      }
-    }
-    else if (data.type === 'CHAT') {
-      setChatMessages(prev => [...prev, { sender: 'them', text: data.text }]);
-    }
-    else if (data.type === 'PLAY_AGAIN') {
-      resetGameStates();
-    }
-  };
+  // ==================== DATA SYNC AND MESSAGING (via Firebase) ====================
+  // Game state sync is handled by setupFirebaseGameListener and syncStateToFirebase
 
   const handleOnlineDisconnect = () => {
-    hasActiveConnectionRef.current = false;
-    
     const activeMode = gameModeRef.current;
     if (activeMode === 'vs-online' || activeMode === 'setup-online') {
       setOnlineStatus('disconnected');
       alert('Opponent disconnected or lobby closed.');
       handleBackToMenu();
-    } else {
-      // We are in the menu. Only clean up the connection so we can accept new ones.
-      if (conn) {
-        try { conn.close(); } catch (e) {}
-        setConn(null);
-      }
     }
   };
 
   const sendChatMessage = () => {
-    if (!chatInput.trim() || !conn) return;
-    conn.send({
-      type: 'CHAT',
-      text: chatInput
-    });
-    setChatMessages(prev => [...prev, { sender: 'me', text: chatInput }]);
+    if (!chatInput.trim() || !gameId) return;
+    const newMsg = { sender: 'me', text: chatInput };
+    const updatedChat = [...chatMessages, newMsg];
+    setChatMessages(updatedChat);
     setChatInput('');
+
+    // Sync chat to opponent via Firebase
+    // We write the chat inside the game state so the opponent's listener picks it up
+    // Use a separate path to avoid race with state sync
+    const chatRef = ref(db, `games/${gameId}/chat`);
+    set(chatRef, {
+      sender: username || 'Guest',
+      text: chatInput,
+      timestamp: Date.now()
+    }).catch(e => console.error("Chat send error:", e));
   };
 
   const syncStateToPeer = (nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog) => {
-    if (conn) {
-      conn.send({
-        type: 'SYNC_STATE',
-        state: {
-          board: nextBoard,
-          moveCount: nextMoveCount,
-          p1: nextP1,
-          p2: nextP2,
-          twiceTurn: nextTwiceTurn,
-          winner: nextWinner,
-          roundLog: nextLog
-        }
-      });
-    }
+    // Delegate to Firebase relay
+    syncStateToFirebase(nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog);
   };
 
   const copyRoomCode = () => {
-    navigator.clipboard.writeText(peerId);
+    navigator.clipboard.writeText(gameId);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -1081,19 +1010,8 @@ function App() {
     setShowTwiceTurnPrompt(false);
     setRoundLog(nextLog);
 
-    if (gameMode === 'vs-online' && conn) {
-      conn.send({
-        type: 'SYNC_STATE',
-        state: {
-          board: board,
-          moveCount: nextMoveCount,
-          p1: p1,
-          p2: p2,
-          twiceTurn: null,
-          winner: winner,
-          roundLog: nextLog
-        }
-      });
+    if (gameMode === 'vs-online' && gameId) {
+      syncStateToFirebase(board, nextMoveCount, p1, p2, null, winner, nextLog);
     }
   };
 
@@ -1119,34 +1037,31 @@ function App() {
   const handlePlayAgain = () => {
     playSound('click');
     resetGameStates();
-    if (gameMode === 'vs-online' && conn) {
-      conn.send({
-        type: 'PLAY_AGAIN'
-      });
+    if (gameMode === 'vs-online' && gameId) {
+      // Signal opponent via Firebase
+      set(ref(db, `games/${gameId}/playAgain`), {
+        triggered: true,
+        by: onlineRole
+      }).catch(e => console.error("Play again error:", e));
     }
   };
 
   // ==================== QUIT / RETURN TO MENU ====================
   const handleBackToMenu = () => {
     playSound('click');
-    hasActiveConnectionRef.current = false;
     cleanupQueueListener();
-    if (peerId) {
-      remove(ref(db, `queue/${peerId}`));
-      remove(ref(db, `rooms/${peerId}`));
+    cleanupGameListener();
+    if (peerIdRef.current) {
+      remove(ref(db, `queue/${peerIdRef.current}`));
     }
-    if (conn) {
-      try {
-        conn.close();
-      } catch (e) {}
-      setConn(null);
+    if (gameId) {
+      remove(ref(db, `games/${gameId}/state`));
+      remove(ref(db, `games/${gameId}/chat`));
+      remove(ref(db, `games/${gameId}/playAgain`));
+      // Also clean up rooms if this was a private room
+      remove(ref(db, `rooms/${gameId}`));
     }
-    if (peer) {
-      try {
-        peer.destroy();
-      } catch (e) {}
-      setPeer(null);
-    }
+    setGameId('');
     setGameMode('menu');
     setBoard(Array(9).fill(null));
     setMoveCount(0);
@@ -1160,7 +1075,7 @@ function App() {
     setChatMessages([]);
     setChatInput('');
     setPrivateLobbyActive(false);
-    setTargetPeerId('');
+    setRoomCodeInput('');
 
     setAiThinking(false);
     aiThinkingRef.current = false;
@@ -1318,8 +1233,8 @@ function App() {
                           className="input-field" 
                           type="text" 
                           placeholder="Enter 5-character code" 
-                          value={targetPeerId}
-                          onChange={(e) => setTargetPeerId(e.target.value.toUpperCase())}
+                          value={roomCodeInput}
+                          onChange={(e) => setRoomCodeInput(e.target.value.toUpperCase())}
                         />
                       </div>
                       <button className="btn btn-primary" onClick={joinPrivateLobby} style={{ marginTop: '0.5rem', width: '100%' }}>
@@ -1345,7 +1260,7 @@ function App() {
                         <>
                           <p style={{ color: 'var(--text-secondary)' }}>Private Room Created! Share this code:</p>
                           <div className="room-code-container">
-                            <span className="room-code">{peerId}</span>
+                            <span className="room-code">{gameId}</span>
                             <button className="copy-btn" onClick={copyRoomCode}>
                               {copied ? <Check size={18} /> : <Copy size={18} />}
                             </button>
