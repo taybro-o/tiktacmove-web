@@ -90,6 +90,7 @@ function App() {
   const hasPostedStatsRef = useRef(false);
   const aiThinkingRef = useRef(false);
   const gameModeRef = useRef(gameMode);
+  const hasActiveConnectionRef = useRef(false);
 
   useEffect(() => {
     gameModeRef.current = gameMode;
@@ -388,6 +389,26 @@ function App() {
 
   // ==================== UNIFIED PEERJS ENGINE ====================
   const setupConnection = (connection, role) => {
+    // If the host is already connected to a player, reject any secondary clients attempting to join
+    if (role === 'host' && hasActiveConnectionRef.current) {
+      console.log("Rejecting concurrent client connection:", connection.peer);
+      try {
+        const sendReject = () => {
+          connection.send({ type: 'REJECTED', reason: 'LOBBY_FULL' });
+          setTimeout(() => { connection.close(); }, 500);
+        };
+        if (connection.open) {
+          sendReject();
+        } else {
+          connection.on('open', sendReject);
+        }
+      } catch (e) {
+        connection.close();
+      }
+      return;
+    }
+
+    hasActiveConnectionRef.current = true;
     setConn(connection);
     setOnlineRole(role);
     setInQueue(false);
@@ -605,6 +626,7 @@ function App() {
 
   const cancelMatchmaking = async () => {
     playSound('click');
+    hasActiveConnectionRef.current = false;
     if (matchmakingIntervalRef.current) {
       clearInterval(matchmakingIntervalRef.current);
     }
@@ -703,7 +725,11 @@ function App() {
 
   // ==================== DATA SYNC AND MESSAGING ====================
   const handleIncomingData = (data) => {
-    if (data.type === 'INIT_GAME') {
+    if (data.type === 'REJECTED') {
+      alert('This lobby is already full.');
+      handleBackToMenu();
+    }
+    else if (data.type === 'INIT_GAME') {
       setP1({ name: data.p1Name, mark: 'X', penaltyCount: 0 });
       setP2({ name: username || 'Guest', mark: 'O', penaltyCount: 0 });
       setRoundLog([{ text: `🎮 Connected! Host: ${data.p1Name} (X). Client: ${username || 'Guest'} (O)`, type: 'info' }]);
@@ -742,6 +768,7 @@ function App() {
   };
 
   const handleOnlineDisconnect = () => {
+    hasActiveConnectionRef.current = false;
     if (matchmakingIntervalRef.current) {
       clearInterval(matchmakingIntervalRef.current);
     }
@@ -1051,6 +1078,7 @@ function App() {
   // ==================== QUIT / RETURN TO MENU ====================
   const handleBackToMenu = () => {
     playSound('click');
+    hasActiveConnectionRef.current = false;
     if (matchmakingIntervalRef.current) {
       clearInterval(matchmakingIntervalRef.current);
     }
