@@ -403,6 +403,8 @@ function App() {
   // Sync local game state to Firebase for the opponent to receive
   const syncStateToFirebase = (nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog, role) => {
     if (!gameId) return;
+    const fbRole = role || onlineRole;
+    console.log(`[FB_SEND] role=${fbRole} moves=${nextMoveCount} board=${JSON.stringify(nextBoard)} p1=${nextP1?.name} p2=${nextP2?.name}`);
     set(ref(db, `games/${gameId}/state`), {
       board: nextBoard,
       moveCount: nextMoveCount,
@@ -411,7 +413,7 @@ function App() {
       twiceTurn: nextTwiceTurn || null,
       winner: nextWinner || null,
       roundLog: nextLog,
-      lastMoveByRole: role || onlineRole,
+      lastMoveByRole: fbRole,
       timestamp: Date.now()
     }).catch(e => console.error("Firebase sync error:", e));
   };
