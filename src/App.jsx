@@ -29,7 +29,7 @@ import './App.css';
 
 // Public Shared Free JSON Bins on ExtendsClass
 const LEADERBOARD_BIN = 'https://extendsclass.com/api/json-storage/bin/fbbaaad';
-const MATCHMAKING_BIN = 'https://api.restful-api.dev/objects/ff8081819d82fab6019e880f368a2d6b';
+const MATCHMAKING_BIN = '/api/matchmaking';
 
 function App() {
   // ==================== CACHED USERNAME & STATS ====================
@@ -474,24 +474,7 @@ function App() {
           isHosting = true;
           setOnlineStatus('waiting');
 
-          const pushQueue = async () => {
-            try {
-              await fetch(MATCHMAKING_BIN, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  data: { queue: { peerId: id, name: username, timestamp: Date.now() } }
-                })
-              });
-            } catch (e) {
-              console.error("Failed to write to queue", e);
-            }
-          };
-
-          await pushQueue();
-
-          // Check EXACTLY ONCE after 3.5 seconds to see if another Host was created concurrently
-          setTimeout(async () => {
+          const checkAndPushQueue = async () => {
             if (!isHosting) return;
             try {
               const res = await fetch(`${MATCHMAKING_BIN}?nocache=${Date.now()}`, { cache: 'no-store' });
@@ -499,48 +482,67 @@ function App() {
               const currentQueue = resJson.data?.queue;
 
               const now = Date.now();
-              if (currentQueue && currentQueue.peerId !== id && Math.abs(now - currentQueue.timestamp) < 300000 && !triedPeerIds.has(currentQueue.peerId)) {
-                console.log("Yielding to concurrent host:", currentQueue.peerId);
-                isHosting = false;
-                if (matchmakingIntervalRef.current) clearInterval(matchmakingIntervalRef.current);
+              const isValidHost = currentQueue && currentQueue.peerId !== id && Math.abs(now - currentQueue.timestamp) < 300000 && !triedPeerIds.has(currentQueue.peerId);
 
-                const tempConn = newPeer.connect(currentQueue.peerId);
-                setupConnection(tempConn, 'client');
+              if (isValidHost) {
+                // Tie-breaking: only the peer with the lexicographically smaller ID yields.
+                // This completely prevents cross-yielding deadlocks where two stranded hosts yield to each other.
+                if (id < currentQueue.peerId) {
+                  console.log("Yielding to concurrent host:", currentQueue.peerId);
+                  isHosting = false;
+                  if (matchmakingIntervalRef.current) clearInterval(matchmakingIntervalRef.current);
 
-                const connectionTimeout = setTimeout(() => {
-                  tempConn.close();
-                  triedPeerIds.add(currentQueue.peerId);
-                  becomeHost();
-                }, 4000);
+                  const tempConn = newPeer.connect(currentQueue.peerId);
+                  setupConnection(tempConn, 'client');
 
-                tempConn.on('open', async () => {
-                  clearTimeout(connectionTimeout);
-                  try {
-                    await fetch(MATCHMAKING_BIN, {
-                      method: 'PUT',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ data: { queue: null } })
-                    });
-                  } catch (e) {}
-                });
+                  const connectionTimeout = setTimeout(() => {
+                    tempConn.close();
+                    triedPeerIds.add(currentQueue.peerId);
+                    becomeHost();
+                  }, 10000);
 
-                tempConn.on('error', () => {
-                  clearTimeout(connectionTimeout);
-                  tempConn.close();
-                  triedPeerIds.add(currentQueue.peerId);
-                  becomeHost();
-                });
+                  tempConn.on('open', async () => {
+                    clearTimeout(connectionTimeout);
+                    try {
+                      await fetch(MATCHMAKING_BIN, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ data: { queue: null } })
+                      });
+                    } catch (e) {}
+                  });
+
+                  tempConn.on('error', () => {
+                    clearTimeout(connectionTimeout);
+                    tempConn.close();
+                    triedPeerIds.add(currentQueue.peerId);
+                    becomeHost();
+                  });
+                  return; // Don't push our queue since we yielded
+                } else {
+                  console.log("Concurrent host found, but we have higher priority. Staying host.");
+                }
               }
-            } catch (err) {}
-          }, 3500);
+
+              // Either no concurrent host, or we have higher priority. Push our own queue to stay visible.
+              await fetch(MATCHMAKING_BIN, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  data: { queue: { peerId: id, name: username, timestamp: Date.now() } }
+                })
+              });
+            } catch (err) {
+              console.error("Queue check/push failed", err);
+            }
+          };
+
+          // Check immediately, then poll every 10 seconds.
+          // This ensures stranded hosts will always eventually find each other.
+          await checkAndPushQueue();
 
           if (matchmakingIntervalRef.current) clearInterval(matchmakingIntervalRef.current);
-          
-          // Refresh timestamp every 60 seconds (well under the 10 requests/min limit)
-          matchmakingIntervalRef.current = setInterval(async () => {
-            if (!isHosting) return;
-            await pushQueue();
-          }, 60000);
+          matchmakingIntervalRef.current = setInterval(checkAndPushQueue, 10000);
 
           newPeer.on('connection', (connection) => {
             isHosting = false;
@@ -573,7 +575,7 @@ function App() {
                   tempConn.close();
                   await attemptConnectionOrHost();
                 }
-              }, 4000);
+              }, 10000);
 
               tempConn.on('open', async () => {
                 if (connected) return;
@@ -769,25 +771,20 @@ function App() {
 
   const handleOnlineDisconnect = () => {
     hasActiveConnectionRef.current = false;
-    if (matchmakingIntervalRef.current) {
-      clearInterval(matchmakingIntervalRef.current);
-    }
     
     const activeMode = gameModeRef.current;
     if (activeMode === 'vs-online' || activeMode === 'setup-online') {
+      if (matchmakingIntervalRef.current) {
+        clearInterval(matchmakingIntervalRef.current);
+      }
       setOnlineStatus('disconnected');
       alert('Opponent disconnected or lobby closed.');
       handleBackToMenu();
     } else {
-      // Silently clean up PeerJS states in background without interrupting local or VS AI games
-      setOnlineStatus('disconnected');
+      // We are in the menu. Only clean up the connection so we can accept new ones.
       if (conn) {
         try { conn.close(); } catch (e) {}
         setConn(null);
-      }
-      if (peer) {
-        try { peer.destroy(); } catch (e) {}
-        setPeer(null);
       }
     }
   };
@@ -1283,7 +1280,7 @@ function App() {
                   
                   {onlineStatus === 'waiting' && (
                     <>
-                      {inQueue ? (
+                      {!privateLobbyActive ? (
                         <p style={{ color: 'var(--text-secondary)', textAlign: 'center' }}>
                           Searching for players globally...<br/>
                           <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Matchmaking queue is active.</span>
