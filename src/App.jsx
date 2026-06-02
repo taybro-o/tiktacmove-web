@@ -422,6 +422,11 @@ function App() {
       setWinner(data.winner || null);
       setRoundLog(data.roundLog || []);
 
+      // Transition to game screen from lobby (client receives initial state)
+      if (gameModeRef.current === 'setup-online') {
+        setGameMode('vs-online');
+      }
+
       // Sound effects for new moves
       if (data.roundLog && data.roundLog.length > 0) {
         const lastLog = data.roundLog[data.roundLog.length - 1];
@@ -481,7 +486,7 @@ function App() {
 
     // Generate a unique session ID if we don't have one
     if (!peerIdRef.current) {
-      peerIdRef.current = crypto.randomUUID();
+      peerIdRef.current = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
     }
     const myId = peerIdRef.current;
 
@@ -596,6 +601,7 @@ function App() {
         };
 
         set(ref(db, `games/${gid}/state`), initState).catch(e => console.error("Firebase init error:", e));
+        setGameMode('vs-online');
         return;
       }
 
@@ -721,6 +727,7 @@ function App() {
           };
 
           set(ref(db, `games/${gid}/state`), initState).catch(e => console.error("Firebase init error:", e));
+          setGameMode('vs-online');
         }
       });
 
