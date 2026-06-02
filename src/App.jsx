@@ -156,6 +156,21 @@ function App() {
     }
   }, [winner, moveCount, p1.name, p2.name, gameMode, activeMark]);
 
+  // ==================== DRAW DETECTION ENGINE ====================
+  // After 50 total moves (22 advance-phase moves per player), declare a draw
+  const DRAW_MOVE_LIMIT = 50;
+  useEffect(() => {
+    if (winner || moveCount < DRAW_MOVE_LIMIT) return;
+    if (gameMode === 'menu' || gameMode === 'setup-online') return;
+    
+    setWinner('draw');
+    setRoundLog(prev => [...prev, { 
+      text: `⚔️ Move limit reached (${DRAW_MOVE_LIMIT})! The match is declared a draw.`, 
+      type: 'info' 
+    }]);
+    playSound('penalty');
+  }, [moveCount, winner, gameMode]);
+
   // ==================== CYBERAI AUTOMATED TURN ENGINE ====================
   useEffect(() => {
     if (gameMode !== 'vs-ai' || winner || activeMark !== 'O') return;
@@ -243,7 +258,11 @@ function App() {
             });
           }
 
-          nextMoveCount += 1;
+          // Only increment moveCount if twiceTurn was NOT just triggered.
+          // handleTwiceTurnChoice will handle the increment when the player decides.
+          if (!nextTwiceTurn) {
+            nextMoveCount += 1;
+          }
 
           setBoard(nextBoard);
           setMoveCount(nextMoveCount);
@@ -882,7 +901,11 @@ function App() {
               });
             }
 
-            nextMoveCount += 1;
+            // Only increment moveCount if twiceTurn was NOT just triggered.
+            // handleTwiceTurnChoice will handle the increment when the opponent decides.
+            if (!nextTwiceTurn) {
+              nextMoveCount += 1;
+            }
             setSelectedPieceIndex(null);
             
             setBoard(nextBoard);
@@ -891,6 +914,11 @@ function App() {
             setP2(nextP2);
             setTwiceTurn(nextTwiceTurn);
             setRoundLog(nextLog);
+            
+            if (nextTwiceTurn) {
+              setShowTwiceTurnPrompt(true);
+              return;
+            }
             
             syncStateToPeer(nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog);
           }
@@ -939,6 +967,7 @@ function App() {
     setMoveCount(0);
     setSelectedPieceIndex(null);
     setTwiceTurn(false);
+    setShowTwiceTurnPrompt(false);
     setWinner(null);
     setRoundLog([{ text: 'Rematch started! Phase 1: Placement.', type: 'info' }]);
     
@@ -949,6 +978,7 @@ function App() {
 
     setAiThinking(false);
     aiThinkingRef.current = false;
+    hasPostedStatsRef.current = false;
   };
 
   const handlePlayAgain = () => {
