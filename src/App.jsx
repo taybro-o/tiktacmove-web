@@ -412,7 +412,10 @@ function App() {
       if (!snapshot.exists()) return;
       const data = snapshot.val();
       // Skip our own writes (same role wrote it)
-      if (data.lastMoveByRole === myRole) return;
+      if (data.lastMoveByRole === myRole) {
+        console.log(`[FB_SKIP] myRole=${myRole} lastBy=${data.lastMoveByRole}`);
+        return;
+      }
 
       setBoard(data.board || Array(9).fill(null));
       setMoveCount(data.moveCount || 0);
