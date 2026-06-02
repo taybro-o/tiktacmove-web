@@ -22,25 +22,27 @@ export default async function handler(req, res) {
     res.setHeader('Expires', '0');
 
     if (req.method === 'GET') {
+      // ExtendsClass GET returns the stored JSON object directly (no wrapper).
+      // e.g. { "queue": { "peerId": "...", "name": "...", "timestamp": 123 } }
+      // We wrap it in { data: ... } for the frontend's expected format.
       const response = await fetch(BIN_URL + '?nocache=' + Date.now(), {
         headers: { 'Cache-Control': 'no-store' }
       });
       const rawData = await response.json();
-      let parsedQueue = null;
-      if (rawData && rawData.data) {
-         try {
-             parsedQueue = JSON.parse(rawData.data);
-         } catch(e) {}
-      }
-      res.status(200).json({ data: parsedQueue || { queue: null } });
+      // rawData IS the queue object directly: { queue: ... } or { queue: null }
+      res.status(200).json({ data: rawData || { queue: null } });
     } else if (req.method === 'PUT') {
+      // Frontend sends: { data: { queue: { peerId, name, timestamp } } }
+      // ExtendsClass expects the raw JSON body to store.
+      // We send req.body.data (which is { queue: ... }) directly to ExtendsClass.
+      const dataToStore = req.body.data || { queue: null };
       const response = await fetch(BIN_URL, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body.data || { queue: null })
+        body: JSON.stringify(dataToStore)
       });
-      const data = await response.json();
-      res.status(200).json(data);
+      const result = await response.json();
+      res.status(200).json(result);
     } else {
       res.status(405).json({ error: 'Method not allowed' });
     }
