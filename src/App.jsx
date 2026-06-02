@@ -586,8 +586,17 @@ function App() {
         setOnlineStatus('connected');
         setOnlineRole('host');
 
-        // Write initial game state with both player names
-        const initState = {
+        // Set initial state locally so host has correct data immediately
+        setBoard(Array(9).fill(null));
+        setMoveCount(0);
+        setP1({ name: username || 'Host', mark: 'X', penaltyCount: 0 });
+        setP2({ name: myEntry.clientName, mark: 'O', penaltyCount: 0 });
+        setTwiceTurn(null);
+        setWinner(null);
+        setRoundLog([{ text: `🎮 Connected! Host: ${username || 'Host'} (X). Client: ${myEntry.clientName} (O)`, type: 'info' }]);
+
+        // Write initial game state to Firebase so client receives it
+        set(ref(db, `games/${gid}/state`), {
           p1: { name: username || 'Host', mark: 'X', penaltyCount: 0 },
           p2: { name: myEntry.clientName, mark: 'O', penaltyCount: 0 },
           board: Array(9).fill(null),
@@ -597,9 +606,7 @@ function App() {
           roundLog: [{ text: `🎮 Connected! Host: ${username || 'Host'} (X). Client: ${myEntry.clientName} (O)`, type: 'info' }],
           lastMoveByRole: 'host',
           timestamp: Date.now()
-        };
-
-        set(ref(db, `games/${gid}/state`), initState).catch(e => console.error("Firebase init error:", e));
+        }).catch(e => console.error("Firebase init error:", e));
         setGameMode('vs-online');
         return;
       }
@@ -712,8 +719,17 @@ function App() {
           setupFirebaseGameListener(gid, 'host');
           setOnlineStatus('connected');
 
-          // Write initial game state
-          const initState = {
+          // Set initial state locally so host has correct data immediately
+          setBoard(Array(9).fill(null));
+          setMoveCount(0);
+          setP1({ name: username || 'Host', mark: 'X', penaltyCount: 0 });
+          setP2({ name: data.clientName, mark: 'O', penaltyCount: 0 });
+          setTwiceTurn(null);
+          setWinner(null);
+          setRoundLog([{ text: `🎮 Connected! Host: ${username || 'Host'} (X). Client: ${data.clientName} (O)`, type: 'info' }]);
+
+          // Write initial game state to Firebase so client receives it
+          set(ref(db, `games/${gid}/state`), {
             p1: { name: username || 'Host', mark: 'X', penaltyCount: 0 },
             p2: { name: data.clientName, mark: 'O', penaltyCount: 0 },
             board: Array(9).fill(null),
@@ -723,9 +739,7 @@ function App() {
             roundLog: [{ text: `🎮 Connected! Host: ${username || 'Host'} (X). Client: ${data.clientName} (O)`, type: 'info' }],
             lastMoveByRole: 'host',
             timestamp: Date.now()
-          };
-
-          set(ref(db, `games/${gid}/state`), initState).catch(e => console.error("Firebase init error:", e));
+          }).catch(e => console.error("Firebase init error:", e));
           setGameMode('vs-online');
         }
       });
