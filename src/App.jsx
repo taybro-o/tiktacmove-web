@@ -29,8 +29,19 @@ import './App.css';
 import { ref, get, set, runTransaction, onDisconnect, remove, query, orderByChild, limitToFirst, onValue, off } from 'firebase/database';
 import { db } from './firebase';
 
-// Public Shared Free JSON Bins on ExtendsClass
-const LEADERBOARD_BIN = 'https://extendsclass.com/api/json-storage/bin/fbbaaad';
+// ==================== LEADERBOARD SEASON HELPERS ====================
+// Returns today's date string in UTC, e.g. "2026-06-03"
+const getTodaySeasonKey = () => {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+};
+// Milliseconds until next UTC midnight
+const msUntilReset = () => {
+  const now = new Date();
+  const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  return tomorrow - now;
+};
+const leaderboardRef = () => ref(db, `leaderboard/${getTodaySeasonKey()}`);
 
 // Firebase RTDB cannot store null in arrays — it strips them, turning the array
 // into a sparse object (e.g. {"0":"O","4":"X"}).  Writing null also triggers
@@ -92,6 +103,9 @@ function App() {
   // Global Leaderboard
   const [leaderboard, setLeaderboard] = useState([]);
   const [loadingLeaderboard, setLoadingLeaderboard] = useState(false);
+  const [resetCountdown, setResetCountdown] = useState('');
+  const leaderboardListenerRef = useRef(null);
+  const [usernameError, setUsernameError] = useState('');
 
   // ==================== ONLINE MULTIPLAYER STATE ====================
   const [gameId, setGameId] = useState('');
@@ -130,11 +144,29 @@ function App() {
     }
   }, []);
 
-  // Fetch Leaderboard on entering setup
+  // Subscribe to leaderboard when entering setup, unsubscribe when leaving
   useEffect(() => {
     if (gameMode === 'setup-online') {
-      loadLeaderboard();
+      subscribeLeaderboard();
+    } else {
+      unsubscribeLeaderboard();
     }
+    return () => unsubscribeLeaderboard();
+  }, [gameMode]);
+
+  // Reset countdown timer — ticks every second while on the setup screen
+  useEffect(() => {
+    if (gameMode !== 'setup-online') return;
+    const tick = () => {
+      const ms = msUntilReset();
+      const h = Math.floor(ms / 3600000);
+      const m = Math.floor((ms % 3600000) / 60000);
+      const s = Math.floor((ms % 60000) / 1000);
+      setResetCountdown(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
   }, [gameMode]);
 
   // Scroll triggers (disabled log auto-scroll to prevent viewport jumping on smaller layouts)
@@ -323,12 +355,37 @@ function App() {
   }, [gameMode, board, moveCount, winner, activeMark, p1, p2, twiceTurn, roundLog]);
 
   // ==================== USERNAME SAVE FLOW ====================
-  const handleSaveUsername = () => {
-    if (!usernameInput.trim()) return alert('Username cannot be empty');
+  const handleSaveUsername = async () => {
+    const name = usernameInput.trim();
+    if (!name) { setUsernameError('Username cannot be empty'); return; }
+    if (name.length < 2) { setUsernameError('Must be at least 2 characters'); return; }
+    setUsernameError('');
+
+    // Check if this name is already taken by another device today
+    try {
+      const seasonRef = leaderboardRef();
+      const snap = await get(seasonRef);
+      if (snap.exists()) {
+        const entries = snap.val();
+        const taken = Object.values(entries).some(
+          e => e.username.toLowerCase() === name.toLowerCase()
+        );
+        // Allow if the saved localStorage username matches (same device editing)
+        const prevName = localStorage.getItem('tiktacmove_username');
+        if (taken && (!prevName || prevName.toLowerCase() !== name.toLowerCase())) {
+          setUsernameError(`"${name}" is already taken today. Pick another!`);
+          return;
+        }
+      }
+    } catch (e) {
+      console.error('Username check failed', e);
+    }
+
     playSound('click');
-    localStorage.setItem('tiktacmove_username', usernameInput.trim());
-    setUsername(usernameInput.trim());
+    localStorage.setItem('tiktacmove_username', name);
+    setUsername(name);
     setShowUsernamePrompt(false);
+    setUsernameError('');
   };
 
   const handleEditUsername = () => {
@@ -337,57 +394,54 @@ function App() {
     setShowUsernamePrompt(true);
   };
 
-  // ==================== LEADERBOARD API ====================
-  const loadLeaderboard = async () => {
+  // ==================== LEADERBOARD (Firebase RTDB, daily reset) ====================
+  const subscribeLeaderboard = () => {
+    unsubscribeLeaderboard();
     setLoadingLeaderboard(true);
-    try {
-      const res = await fetch(LEADERBOARD_BIN);
-      const data = await res.json();
-      setLeaderboard(data.leaderboard || []);
-    } catch (e) {
-      console.error("Failed to load leaderboard", e);
-    } finally {
+    const seasonRef = leaderboardRef();
+    const unsub = onValue(seasonRef, (snapshot) => {
+      if (!snapshot.exists()) { setLeaderboard([]); setLoadingLeaderboard(false); return; }
+      const entries = snapshot.val();
+      let list = Object.values(entries);
+      // Sort: wins desc, then losses asc, then win-ratio desc
+      list.sort((a, b) => b.wins - a.wins || a.losses - b.losses);
+      setLeaderboard(list.slice(0, 20));
       setLoadingLeaderboard(false);
+    });
+    leaderboardListenerRef.current = unsub;
+  };
+
+  const unsubscribeLeaderboard = () => {
+    if (leaderboardListenerRef.current) {
+      leaderboardListenerRef.current();
+      leaderboardListenerRef.current = null;
     }
   };
 
+  const loadLeaderboard = () => {
+    // Re-subscribe to pick up a potential season key change (if midnight passed)
+    subscribeLeaderboard();
+  };
+
   const syncStatsToLeaderboard = async (name, isWinner) => {
+    if (!name) return;
+    const nameLower = name.toLowerCase();
+    const playerRef = ref(db, `leaderboard/${getTodaySeasonKey()}/${nameLower}`);
     try {
-      const res = await fetch(LEADERBOARD_BIN);
-      let data = await res.json();
-      let list = data.leaderboard || [];
-      
-      if (!Array.isArray(list)) {
-        list = [];
-      }
-      
-      let player = list.find(p => p.username.toLowerCase() === name.toLowerCase());
-      if (player) {
-        if (isWinner) player.wins += 1;
-        else player.losses += 1;
-      } else {
-        list.push({
-          username: name,
-          wins: isWinner ? 1 : 0,
-          losses: isWinner ? 0 : 1
-        });
-      }
-      
-      // Sort: wins desc, then losses asc
-      list.sort((a, b) => b.wins - a.wins || a.losses - b.losses);
-      
-      // Keep top 15
-      list = list.slice(0, 15);
-      
-      await fetch(LEADERBOARD_BIN, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ leaderboard: list })
+      await runTransaction(playerRef, (current) => {
+        if (current === null) {
+          return {
+            username: name,
+            wins: isWinner ? 1 : 0,
+            losses: isWinner ? 0 : 1
+          };
+        }
+        if (isWinner) current.wins = (current.wins || 0) + 1;
+        else current.losses = (current.losses || 0) + 1;
+        return current;
       });
-      
-      setLeaderboard(list);
     } catch (e) {
-      console.error("Leaderboard post failed", e);
+      console.error("Leaderboard sync failed", e);
     }
   };
 
@@ -1183,9 +1237,12 @@ function App() {
                 maxLength={14}
                 placeholder="Enter username..." 
                 value={usernameInput}
-                onChange={(e) => setUsernameInput(e.target.value)}
+                onChange={(e) => { setUsernameInput(e.target.value); setUsernameError(''); }}
                 onKeyDown={(e) => e.key === 'Enter' && handleSaveUsername()}
               />
+              {usernameError && (
+                <p style={{ color: 'var(--pink)', fontSize: '0.82rem', marginTop: '0.35rem' }}>{usernameError}</p>
+              )}
             </div>
             <button className="btn btn-primary" onClick={handleSaveUsername}>
               Save CyberName ⚡
@@ -1364,10 +1421,14 @@ function App() {
           <aside className="leaderboard-col">
             <div className="glass-panel leaderboard-panel">
               <div className="leaderboard-header">
-                <h3>🏆 Global Cyber Arena Leaderboard</h3>
+                <h3>🏆 Daily Cyber Arena</h3>
                 <button className="icon-btn" onClick={loadLeaderboard} title="Refresh Scores" style={{ width: '36px', height: '36px' }}>
                   <RotateCcw size={16} />
                 </button>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.35rem 0.8rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                <span>Season: {getTodaySeasonKey()}</span>
+                <span>Resets in <strong style={{ color: 'var(--cyan)' }}>{resetCountdown}</strong></span>
               </div>
 
               {loadingLeaderboard ? (
