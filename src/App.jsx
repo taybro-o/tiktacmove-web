@@ -26,7 +26,7 @@ import {
   SIZE 
 } from './gameLogic';
 import './App.css';
-import { ref, get, set, runTransaction, onDisconnect, remove, query, orderByChild, limitToFirst, onValue, off } from 'firebase/database';
+import { ref, get, set, update, runTransaction, onDisconnect, remove, query, orderByChild, limitToFirst, onValue, off } from 'firebase/database';
 import { db } from './firebase';
 
 // ==================== LEADERBOARD SEASON HELPERS ====================
@@ -217,7 +217,7 @@ function App() {
         setStatusMessage(`⚡ ${activePlayer.name}'s Turn - [${phaseLabel}]`);
       }
     }
-  }, [winner, moveCount, p1.name, p2.name, gameMode, activeMark]);
+  }, [winner, moveCount, p1.name, p2.name, gameMode]);
 
   // ==================== DRAW DETECTION ENGINE ====================
   // After 50 total moves (22 advance-phase moves per player), declare a draw
@@ -241,11 +241,12 @@ function App() {
 
     aiThinkingRef.current = true;
     setAiThinking(true);
+    let cancelled = false;
 
     const aiTimer = setTimeout(() => {
+      if (cancelled) { aiThinkingRef.current = false; return; }
       let nextBoard = [...board];
       let nextMoveCount = moveCount;
-      let nextP1 = { ...p1 };
       let nextP2 = { ...p2 };
       let nextWinner = winner;
       let nextLog = [...roundLog];
@@ -350,9 +351,10 @@ function App() {
     }, 1000);
 
     return () => {
+      cancelled = true;
       clearTimeout(aiTimer);
     };
-  }, [gameMode, board, moveCount, winner, activeMark, p1, p2, twiceTurn, roundLog]);
+  }, [gameMode, board, moveCount, winner, activeMark, p1, p2, twiceTurn]);
 
   // ==================== USERNAME SAVE FLOW ====================
   const handleSaveUsername = async () => {
@@ -464,7 +466,7 @@ function App() {
       localStorage.setItem('tiktacmove_online_stats', JSON.stringify(nextStats));
       syncStatsToLeaderboard(username, false);
     }
-  }, [winner, gameMode]);
+  }, [winner, gameMode, onlineRole, username, localOnlineStats]);
 
   // ==================== FIREBASE GAME RELAY ENGINE ====================
   // Sync local game state to Firebase for the opponent to receive
@@ -476,13 +478,13 @@ function App() {
       (nextBoard[i] === null || nextBoard[i] === undefined) ? EMPTY_CELL : nextBoard[i]
     );
     const writeLog = Array.isArray(nextLog) ? [...nextLog] : [];
-    console.log(`[FB_SEND] role=${fbRole} moves=${nextMoveCount} board=${JSON.stringify(writeBoard)} p1=${nextP1?.name} p2=${nextP2?.name}`);
+
     set(ref(db, `games/${gameId}/state`), {
       board: writeBoard,
       moveCount: nextMoveCount,
       p1: nextP1,
       p2: nextP2,
-      twiceTurn: nextTwiceTurn || null,
+      twiceTurn: nextTwiceTurn ?? null,
       winner: nextWinner || null,
       roundLog: writeLog,
       lastMoveByRole: fbRole,
@@ -499,7 +501,7 @@ function App() {
       const data = snapshot.val();
       // Skip our own writes (same role wrote it)
       if (data.lastMoveByRole === myRole) {
-        console.log(`[FB_SKIP] myRole=${myRole} lastBy=${data.lastMoveByRole}`);
+
         return;
       }
 
@@ -509,7 +511,7 @@ function App() {
       setP2(data.p2 || { name: 'Player 2', mark: 'O', penaltyCount: 0 });
       setTwiceTurn(data.twiceTurn || null);
       setWinner(data.winner || null);
-      console.log(`[FB_RECV] role=${myRole} lastBy=${data.lastMoveByRole} moves=${data.moveCount} board=${JSON.stringify(data.board)} p1=${data.p1?.name} p2=${data.p2?.name}`);
+
       setRoundLog(data.roundLog || []);
 
       // Transition to game screen from lobby (client receives initial state)
@@ -528,7 +530,7 @@ function App() {
       }
     });
 
-    gameListenerRef.current = unsubscribe;
+
 
     // Listen for incoming chat messages
     const chatRef = ref(db, `games/${gid}/chat`);
@@ -545,7 +547,7 @@ function App() {
     const playAgainUnsubscribe = onValue(playAgainRef, (snapshot) => {
       if (!snapshot.exists()) return;
       const data = snapshot.val();
-      if (data.triggered && data.by !== onlineRole) {
+      if (data.triggered && data.by !== myRole) {
         resetGameStates();
         set(playAgainRef, null); // Clear the signal
       }
@@ -561,7 +563,7 @@ function App() {
 
   const cleanupGameListener = () => {
     if (gameListenerRef.current) {
-      try { gameListenerRef.current(); } catch(e) {}
+      try { gameListenerRef.current(); } catch (err) { console.error('gameListener cleanup error:', err); }
       gameListenerRef.current = null;
     }
   };
@@ -606,7 +608,7 @@ function App() {
             if (committed && txSnapshot.exists() && txSnapshot.val()?.claimedBy === myId) {
               // Successfully claimed this host
               claimed = true;
-              console.log("Claimed host:", hostKey);
+
               setOnlineRole('client');
               setInQueue(false);
 
@@ -689,7 +691,7 @@ function App() {
         set(ref(db, `games/${gid}/state`), {
           p1: { name: username || 'Host', mark: 'X', penaltyCount: 0 },
           p2: { name: myEntry.clientName, mark: 'O', penaltyCount: 0 },
-          board: Array(9).fill(null),
+          board: Array(BOARD_SIZE).fill(EMPTY_CELL),
           moveCount: 0,
           twiceTurn: null,
           winner: null,
@@ -718,7 +720,7 @@ function App() {
           });
 
           if (committed && txSnapshot.exists() && txSnapshot.val()?.claimedBy === myPeerId) {
-            console.log("Queue watcher: claimed another host:", hostKey);
+
 
             // Remove our own queue entry since we're now a client
             remove(myQueueRef);
@@ -748,7 +750,7 @@ function App() {
     if (queueListenerRef.current) {
       try {
         queueListenerRef.current.unsubscribe();
-      } catch(e) {}
+      } catch (err) { console.error('queueListener cleanup error:', err); }
       queueListenerRef.current = null;
     }
   };
@@ -822,7 +824,7 @@ function App() {
           set(ref(db, `games/${gid}/state`), {
             p1: { name: username || 'Host', mark: 'X', penaltyCount: 0 },
             p2: { name: data.clientName, mark: 'O', penaltyCount: 0 },
-            board: Array(9).fill(null),
+            board: Array(BOARD_SIZE).fill(EMPTY_CELL),
             moveCount: 0,
             twiceTurn: null,
             winner: null,
@@ -876,15 +878,6 @@ function App() {
 
   // ==================== DATA SYNC AND MESSAGING (via Firebase) ====================
   // Game state sync is handled by setupFirebaseGameListener and syncStateToFirebase
-
-  const handleOnlineDisconnect = () => {
-    const activeMode = gameModeRef.current;
-    if (activeMode === 'vs-online' || activeMode === 'setup-online') {
-      setOnlineStatus('disconnected');
-      alert('Opponent disconnected or lobby closed.');
-      handleBackToMenu();
-    }
-  };
 
   const sendChatMessage = () => {
     if (!chatInput.trim() || !gameId) return;
@@ -944,11 +937,11 @@ function App() {
 
   // ==================== CELL CLICK ACTIONS ====================
   const handleCellClick = (index) => {
-    console.log(`[CLICK] mode=${gameMode} role=${onlineRole} mark=${activeMark} moves=${moveCount} board=${JSON.stringify(board)} winner=${winner}`);
+
     if (winner) return;
     
     if (gameMode === 'vs-online') {
-      console.log(`[TURN] host blocked? ${onlineRole === 'host' && activeMark === 'O'} | client blocked? ${onlineRole === 'client' && activeMark === 'X'}`);
+
       if (onlineRole === 'host' && activeMark === 'O') return;
       if (onlineRole === 'client' && activeMark === 'X') return;
     }
@@ -1060,14 +1053,12 @@ function App() {
           } 
           // ILLEGAL MOVE PLAYED -> PENALTY INFLICTED
           else {
-            let currentPenCount = 0;
             if (activeMark === 'X') {
               nextP1.penaltyCount += 1;
-              currentPenCount = nextP1.penaltyCount;
             } else {
               nextP2.penaltyCount += 1;
-              currentPenCount = nextP2.penaltyCount;
             }
+            const currentPenCount = activeMark === 'X' ? nextP1.penaltyCount : nextP2.penaltyCount;
 
             playSound('penalty');
             nextLog.push({ 
@@ -1167,11 +1158,11 @@ function App() {
       remove(ref(db, `queue/${peerIdRef.current}`));
     }
     if (gameId) {
-      remove(ref(db, `games/${gameId}/state`));
-      remove(ref(db, `games/${gameId}/chat`));
-      remove(ref(db, `games/${gameId}/playAgain`));
-      // Also clean up rooms if this was a private room
-      remove(ref(db, `rooms/${gameId}`));
+      // Atomic cleanup of all game data and room entry
+      update(ref(db), {
+        [`games/${gameId}`]: null,
+        [`rooms/${gameId}`]: null
+      }).catch(e => console.error('Cleanup error:', e));
     }
     setGameId('');
     setGameMode('menu');

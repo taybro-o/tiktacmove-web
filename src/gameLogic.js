@@ -163,6 +163,9 @@ export function getBestAIMove(board, aiMark, playerMark, moveCount) {
   if (validMoves.length === 0) {
     // Fallback: If no valid moves exist, pick any piece and move it to any empty slot (gets penalty)
     const myPieces = board.map((val, idx) => val === aiMark ? idx : null).filter(val => val !== null);
+    if (myPieces.length === 0 || emptyIndices.length === 0) {
+      return { type: 'place', index: 0 }; // Safety fallback — should never happen
+    }
     const randomPiece = myPieces[Math.floor(Math.random() * myPieces.length)];
     const randomEmpty = emptyIndices[Math.floor(Math.random() * emptyIndices.length)];
     return { type: 'move', from: randomPiece, to: randomEmpty, isIllegal: true };
