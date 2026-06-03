@@ -32,21 +32,27 @@ import { db } from './firebase';
 // Public Shared Free JSON Bins on ExtendsClass
 const LEADERBOARD_BIN = 'https://extendsclass.com/api/json-storage/bin/fbbaaad';
 
-// Firebase RTDB strips trailing nulls from arrays. A 9-element board like
-// ["O",null,"X",null,"X",null,null,null,null] comes back as ["O",null,"X",null,"X"]
-// Only 5 elements! This breaks board[5+], making cells unclickable.
-// Always pad back to exactly 9 elements.
+// Firebase RTDB cannot store null in arrays — it strips them, turning the array
+// into a sparse object (e.g. {"0":"O","4":"X"}).  Writing null also triggers
+// "set failed: value argument contains undefined".  Fix: use empty-string ""
+// as a sentinel for empty cells when writing and convert back to null on read.
 const BOARD_SIZE = 9;
+const EMPTY_CELL = "";          // sentinel stored in Firebase for empty cells
 const boardFromFirebase = (data) => {
   if (!data) return Array(BOARD_SIZE).fill(null);
+  const result = Array(BOARD_SIZE).fill(null);
   if (Array.isArray(data)) {
-    while (data.length < BOARD_SIZE) data.push(null);
-    return data.slice(0, BOARD_SIZE);
+    for (let i = 0; i < BOARD_SIZE; i++) {
+      const v = data[i];
+      result[i] = (v === EMPTY_CELL || v === undefined || v === null) ? null : v;
+    }
+    return result;
   }
   // Object with numeric keys (Firebase stores sparse arrays this way)
-  const result = Array(BOARD_SIZE).fill(null);
   for (let i = 0; i < BOARD_SIZE; i++) {
-    if (data[i] !== undefined) result[i] = data[i];
+    if (data[i] !== undefined && data[i] !== null) {
+      result[i] = data[i] === EMPTY_CELL ? null : data[i];
+    }
   }
   return result;
 };
@@ -411,10 +417,10 @@ function App() {
   const syncStateToFirebase = (nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog, role) => {
     if (!gameId) return;
     const fbRole = role || onlineRole;
-    // Ensure board is always exactly 9 elements — Firebase strips trailing nulls
-    const writeBoard = [...nextBoard];
-    while (writeBoard.length < BOARD_SIZE) writeBoard.push(null);
-    writeBoard.length = BOARD_SIZE;
+    // Replace null/undefined with EMPTY_CELL sentinel — Firebase cannot store nulls
+    const writeBoard = Array.from({ length: BOARD_SIZE }, (_, i) =>
+      (nextBoard[i] === null || nextBoard[i] === undefined) ? EMPTY_CELL : nextBoard[i]
+    );
     const writeLog = Array.isArray(nextLog) ? [...nextLog] : [];
     console.log(`[FB_SEND] role=${fbRole} moves=${nextMoveCount} board=${JSON.stringify(writeBoard)} p1=${nextP1?.name} p2=${nextP2?.name}`);
     set(ref(db, `games/${gameId}/state`), {
