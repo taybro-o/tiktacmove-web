@@ -356,6 +356,25 @@ function App() {
     };
   }, [gameMode, board, moveCount, winner, activeMark, p1, p2, twiceTurn]);
 
+  // ==================== TWICE-TURN PROMPT (START OF TURN) ====================
+  // When a player maxes out penalties, twiceTurn is set to the OPPONENT's mark
+  // and the prompt must fire on the OPPONENT's very next turn — before they
+  // play a move — so they can decide whether to skip the penalty-maxing
+  // player's following turn.
+  useEffect(() => {
+    if (winner) return;
+    if (gameMode !== 'vs-local' && gameMode !== 'vs-ai' && gameMode !== 'vs-online') return;
+    if (twiceTurn !== activeMark) return;
+    if (showTwiceTurnPrompt) return;
+    if (selectedPieceIndex !== null) return; // wait for any in-progress move to resolve
+    // In vs-ai the beneficiary must be the human player; AI never sees this prompt
+    if (gameMode === 'vs-ai' && activeMark === 'O') return;
+    if (gameMode === 'vs-ai' && aiThinking) return;
+
+    setShowTwiceTurnPrompt(true);
+    playSound('select');
+  }, [twiceTurn, activeMark, winner, gameMode, showTwiceTurnPrompt, selectedPieceIndex, aiThinking]);
+
   // ==================== USERNAME SAVE FLOW ====================
   const handleSaveUsername = async () => {
     const name = usernameInput.trim();
@@ -1035,14 +1054,10 @@ function App() {
               return;
             }
 
-            if (twiceTurn === activeMark) {
-              setBoard(nextBoard);
-              setRoundLog(nextLog);
-              setWinner(nextWinner);
-              setSelectedPieceIndex(null);
-              setShowTwiceTurnPrompt(true);
-              return;
-            }
+            // The twice-turn prompt is surfaced at the *start* of the
+            // beneficiary's next turn (see the startOfTurnTwiceTurn effect),
+            // so by the time we reach this branch the flag has already been
+            // consumed and we just advance the move count normally.
 
             nextMoveCount += 1;
             setSelectedPieceIndex(null);
