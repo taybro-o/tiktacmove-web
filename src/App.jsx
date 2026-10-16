@@ -385,21 +385,26 @@ function App() {
     // Check if this name is already taken by another device today
     try {
       const seasonRef = leaderboardRef();
-      const snap = await get(seasonRef);
-      if (snap.exists()) {
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Firebase check timeout')), 3000)
+      );
+      const snap = await Promise.race([get(seasonRef), timeoutPromise]);
+      if (snap && snap.exists()) {
         const entries = snap.val();
-        const taken = Object.values(entries).some(
-          e => e.username.toLowerCase() === name.toLowerCase()
-        );
-        // Allow if the saved localStorage username matches (same device editing)
-        const prevName = localStorage.getItem('tiktacmove_username');
-        if (taken && (!prevName || prevName.toLowerCase() !== name.toLowerCase())) {
-          setUsernameError(`"${name}" is already taken today. Pick another!`);
-          return;
+        if (entries && typeof entries === 'object') {
+          const taken = Object.values(entries).some(
+            e => e && typeof e.username === 'string' && e.username.toLowerCase() === name.toLowerCase()
+          );
+          // Allow if the saved localStorage username matches (same device editing)
+          const prevName = localStorage.getItem('tiktacmove_username');
+          if (taken && (!prevName || prevName.toLowerCase() !== name.toLowerCase())) {
+            setUsernameError(`"${name}" is already taken today. Pick another!`);
+            return;
+          }
         }
       }
     } catch (e) {
-      console.error('Username check failed', e);
+      console.warn('Username check skipped or timed out:', e);
     }
 
     playSound('click');

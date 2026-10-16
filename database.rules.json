@@ -4,14 +4,14 @@
       ".read": true,
       "$peerId": {
         ".write": true,
-        ".validate": "newData.hasChildren(['peerId', 'name', 'timestamp']) && newData.child('peerId').isString() && newData.child('name').isString() && newData.child('name').val().length <= 30"
+        ".validate": "!newData.exists() || (newData.hasChildren(['peerId', 'name']) && newData.child('peerId').isString())"
       }
     },
     "rooms": {
       ".read": true,
       "$roomCode": {
         ".write": true,
-        ".validate": "newData.hasChildren(['hostName', 'timestamp']) && newData.child('hostName').isString() && newData.child('hostName').val().length <= 30"
+        ".validate": "!newData.exists() || newData.hasChildren(['hostName'])"
       }
     },
     "games": {
@@ -19,19 +19,20 @@
         ".read": true,
         ".write": true,
         "chat": {
-          ".validate": "!newData.exists() || (newData.hasChildren(['sender', 'text']) && newData.child('sender').isString() && newData.child('sender').val().length <= 30 && newData.child('text').isString() && newData.child('text').val().length <= 200)"
+          ".validate": "!newData.exists() || (newData.hasChildren(['sender', 'text']) && newData.child('sender').isString() && newData.child('text').isString() && newData.child('text').val().length <= 200)"
         },
         "state": {
-          ".validate": "!newData.exists() || (newData.hasChildren(['board', 'moveCount']) && newData.child('moveCount').isNumber())"
+          ".validate": "!newData.exists() || newData.hasChildren(['board', 'moveCount'])"
         }
       }
     },
     "leaderboard": {
       ".read": true,
       "$season": {
+        ".read": true,
         "$user": {
           ".write": true,
-          ".validate": "newData.hasChildren(['username', 'wins', 'losses']) && newData.child('username').isString() && newData.child('username').val().length <= 30 && newData.child('wins').isNumber() && newData.child('losses').isNumber() && (!data.exists() || (newData.child('wins').val() >= data.child('wins').val() && newData.child('losses').val() >= data.child('losses').val()))"
+          ".validate": "!newData.exists() || (newData.hasChildren(['username', 'wins', 'losses']) && newData.child('username').isString() && newData.child('wins').isNumber() && newData.child('losses').isNumber())"
         }
       }
     }
