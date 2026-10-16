@@ -524,14 +524,27 @@ function App() {
         return;
       }
 
-      setBoard(boardFromFirebase(data.board));
-      setMoveCount(data.moveCount || 0);
+      const incomingBoard = boardFromFirebase(data.board);
+      setBoard(incomingBoard);
+      setMoveCount(typeof data.moveCount === 'number' ? data.moveCount : 0);
       setP1(data.p1 || { name: 'Player 1', mark: 'X', penaltyCount: 0 });
       setP2(data.p2 || { name: 'Player 2', mark: 'O', penaltyCount: 0 });
       setTwiceTurn(data.twiceTurn || null);
-      setWinner(data.winner || null);
 
-      setRoundLog(data.roundLog || []);
+      // Validate incoming winner claims against actual board state
+      let verifiedWinner = null;
+      if (data.winner === 'X' || data.winner === 'O') {
+        if (checkWin(incomingBoard, data.winner)) {
+          verifiedWinner = data.winner;
+        } else {
+          console.warn(`[Security] Rejected unverified win claim for mark "${data.winner}"`);
+        }
+      } else if (data.winner === 'draw') {
+        verifiedWinner = 'draw';
+      }
+      setWinner(verifiedWinner);
+
+      setRoundLog(Array.isArray(data.roundLog) ? data.roundLog.slice(-50) : []);
 
       // Transition to game screen from lobby (client receives initial state)
       if (gameModeRef.current === 'setup-online') {
@@ -541,15 +554,13 @@ function App() {
       // Sound effects for new moves
       if (data.roundLog && data.roundLog.length > 0) {
         const lastLog = data.roundLog[data.roundLog.length - 1];
-        if (lastLog.text.includes('illegal')) playSound('penalty');
-        else if (lastLog.text.includes('won')) playSound('win');
-        else if (lastLog.text.includes('selected')) playSound('select');
-        else if (lastLog.text.includes('moved')) playSound('move');
-        else if (!lastLog.text.includes('Waiting')) playSound('click');
+        if (lastLog?.text?.includes('illegal')) playSound('penalty');
+        else if (lastLog?.text?.includes('won')) playSound('win');
+        else if (lastLog?.text?.includes('selected')) playSound('select');
+        else if (lastLog?.text?.includes('moved')) playSound('move');
+        else if (!lastLog?.text?.includes('Waiting')) playSound('click');
       }
     });
-
-
 
     // Listen for incoming chat messages
     const chatRef = ref(db, `games/${gid}/chat`);
@@ -557,7 +568,10 @@ function App() {
       if (!snapshot.exists()) return;
       const data = snapshot.val();
       if (data.sender && data.sender !== username) {
-        setChatMessages(prev => [...prev, { sender: 'them', text: data.text }]);
+        const safeText = typeof data.text === 'string' ? data.text.slice(0, 200) : '';
+        if (safeText) {
+          setChatMessages(prev => [...prev.slice(-49), { sender: 'them', text: safeText }]);
+        }
       }
     });
 
@@ -899,9 +913,10 @@ function App() {
   // Game state sync is handled by setupFirebaseGameListener and syncStateToFirebase
 
   const sendChatMessage = () => {
-    if (!chatInput.trim() || !gameId) return;
-    const newMsg = { sender: 'me', text: chatInput };
-    const updatedChat = [...chatMessages, newMsg];
+    const sanitizedText = chatInput.trim().slice(0, 200);
+    if (!sanitizedText || !gameId) return;
+    const newMsg = { sender: 'me', text: sanitizedText };
+    const updatedChat = [...chatMessages.slice(-49), newMsg];
     setChatMessages(updatedChat);
     setChatInput('');
 
@@ -910,8 +925,8 @@ function App() {
     // Use a separate path to avoid race with state sync
     const chatRef = ref(db, `games/${gameId}/chat`);
     set(chatRef, {
-      sender: username || 'Guest',
-      text: chatInput,
+      sender: (username || 'Guest').slice(0, 25),
+      text: sanitizedText,
       timestamp: Date.now()
     }).catch(e => console.error("Chat send error:", e));
   };
