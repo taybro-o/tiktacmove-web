@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { checkWin, isValidMove, getBestAIMove, getCoords } from '../gameLogic';
+import { checkWin, isValidMove, getCoords } from '../gameLogic';
 import { INITIAL_P1, INITIAL_P2, DRAW_MOVE_LIMIT } from '../constants/game';
+import { getAIMoveByDifficulty, AI_CONFIGS } from '../aiEngine';
 
 export function getCoordLabel(index) {
   const coords = getCoords(index);
@@ -9,7 +10,7 @@ export function getCoordLabel(index) {
   return `${rowLetter}${colNum}`;
 }
 
-export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
+export function useGameState({ gameMode, onlineRole, playSound, onSyncState, aiDifficulty = 'medium' }) {
   const [board, setBoard] = useState(Array(9).fill(null));
   const [moveCount, setMoveCount] = useState(0);
   const [p1, setP1] = useState(INITIAL_P1);
@@ -18,6 +19,8 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
   const [twiceTurn, setTwiceTurn] = useState(null); // 'X' or 'O' or null
   const [winner, setWinner] = useState(null); // 'X', 'O', 'draw', null
   const [roundLog, setRoundLog] = useState([]);
+  const [moveHistory, setMoveHistory] = useState([]);
+  const [slidingMove, setSlidingMove] = useState(null);
   const [aiThinking, setAiThinking] = useState(false);
 
   const aiThinkingRef = useRef(false);
@@ -29,16 +32,16 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
   let statusMessage;
   if (winner) {
     if (winner === 'draw') {
-      statusMessage = '⚔️ Match ended in a draw!';
+      statusMessage = 'Match concluded in a draw';
     } else {
       const winningPlayer = winner === 'X' ? p1.name : p2.name;
-      statusMessage = `🏆 ${winningPlayer} Wins the Arena!`;
+      statusMessage = `${winningPlayer} has won the match`;
     }
   } else if (gameMode === 'vs-ai' && activeMark === 'O') {
-    statusMessage = '🤖 CyberAI is scanning the grid...';
+    statusMessage = `${p2.name} is calculating...`;
   } else {
-    const phaseLabel = moveCount < 6 ? 'Placement Phase' : 'Advance Phase';
-    statusMessage = `⚡ ${activePlayer.name}'s Turn - [${phaseLabel}]`;
+    const phaseLabel = moveCount < 6 ? 'Placement' : 'Advance';
+    statusMessage = `${activePlayer.name}'s Turn • ${phaseLabel}`;
   }
 
   // Derived twice turn prompt visibility
@@ -60,6 +63,7 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
     aiThinkingRef.current = true;
     setAiThinking(true);
     let cancelled = false;
+    let slideTimer = null;
 
     const aiTimer = setTimeout(() => {
       if (cancelled) {
@@ -72,27 +76,43 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
       let nextWinner = winner;
       let nextLog = [...roundLog];
       let nextTwiceTurn = twiceTurn;
+      let nextHistory = [...moveHistory];
 
-      const aiMove = getBestAIMove(board, 'O', 'X', moveCount);
+      const aiMove = getAIMoveByDifficulty(board, 'O', 'X', moveCount, aiDifficulty);
+      const aiName = p2.name || AI_CONFIGS[aiDifficulty]?.name || 'CyberAI';
 
       if (aiMove.type === 'place') {
         const index = aiMove.index;
         nextBoard[index] = 'O';
         playSound('click');
         nextLog.push({
-          text: `CyberAI placed O at ${getCoordLabel(index)}.`,
+          text: `${aiName} placed O at ${getCoordLabel(index)}.`,
           type: 'o'
         });
 
-        if (checkWin(nextBoard, 'O')) {
+        const isWin = checkWin(nextBoard, 'O');
+        nextHistory.push({
+          type: 'place',
+          mark: 'O',
+          from: null,
+          to: index,
+          boardBefore: [...board],
+          boardAfter: [...nextBoard],
+          playerName: aiName,
+          moveNumber: nextMoveCount + 1,
+          isWinningMove: isWin
+        });
+
+        if (isWin) {
           nextWinner = 'O';
           playSound('win');
-          nextLog.push({ text: `🏆 CyberAI has won the game!`, type: 'success' });
+          nextLog.push({ text: `🏆 ${aiName} has won the game!`, type: 'success' });
+          nextMoveCount += 1;
         } else {
           if (nextTwiceTurn === 'O') {
             nextMoveCount += 2;
             nextTwiceTurn = null;
-            nextLog.push({ text: `⚡ CyberAI ACCEPTED the skip! ${p1.name}'s turn is skipped.`, type: 'info' });
+            nextLog.push({ text: `⚡ ${aiName} ACCEPTED the skip! ${p1.name}'s turn is skipped.`, type: 'info' });
           } else {
             nextMoveCount += 1;
           }
@@ -100,36 +120,103 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
             nextLog.push({ text: 'Phase 2: Advance Phase! Slide your existing 3 pieces.', type: 'info' });
           }
         }
+
+        // Check Draw limit
+        if (nextMoveCount >= DRAW_MOVE_LIMIT && !nextWinner) {
+          nextWinner = 'draw';
+          nextLog.push({
+            text: `⚔️ Move limit reached (${DRAW_MOVE_LIMIT})! The match is declared a draw.`,
+            type: 'info'
+          });
+          playSound('penalty');
+        }
+
+        setBoard(nextBoard);
+        setMoveCount(nextMoveCount);
+        setP2(nextP2);
+        setWinner(nextWinner);
+        setRoundLog(nextLog);
+        setTwiceTurn(nextTwiceTurn);
+        setMoveHistory(nextHistory);
+
+        setAiThinking(false);
+        aiThinkingRef.current = false;
       } else if (aiMove.type === 'move') {
         const { from, to, isIllegal } = aiMove;
 
         if (!isIllegal) {
           nextBoard[to] = 'O';
           nextBoard[from] = null;
-          playSound('move');
+
           nextLog.push({
-            text: `CyberAI moved piece from ${getCoordLabel(from)} to ${getCoordLabel(to)}.`,
+            text: `${aiName} moved piece from ${getCoordLabel(from)} to ${getCoordLabel(to)}.`,
             type: 'o'
           });
 
-          if (checkWin(nextBoard, 'O')) {
-            nextWinner = 'O';
-            playSound('win');
-            nextLog.push({ text: `🏆 CyberAI has won the game!`, type: 'success' });
-          } else {
-            if (nextTwiceTurn === 'O') {
-              nextMoveCount += 2;
-              nextTwiceTurn = null;
-              nextLog.push({ text: `⚡ CyberAI ACCEPTED the skip! ${p1.name}'s turn is skipped.`, type: 'info' });
-            } else {
-              nextMoveCount += 1;
+          const isWin = checkWin(nextBoard, 'O');
+          nextHistory.push({
+            type: 'move',
+            mark: 'O',
+            from,
+            to,
+            boardBefore: [...board],
+            boardAfter: [...nextBoard],
+            playerName: aiName,
+            moveNumber: nextMoveCount + 1,
+            isWinningMove: isWin
+          });
+
+          // Trigger sliding piece animation!
+          setSlidingMove({ from, to, mark: 'O' });
+          playSound('move');
+
+          slideTimer = setTimeout(() => {
+            if (cancelled) {
+              aiThinkingRef.current = false;
+              return;
             }
-          }
+
+            if (isWin) {
+              nextWinner = 'O';
+              playSound('win');
+              nextLog.push({ text: `🏆 ${aiName} has won the game!`, type: 'success' });
+              nextMoveCount += 1;
+            } else {
+              if (nextTwiceTurn === 'O') {
+                nextMoveCount += 2;
+                nextTwiceTurn = null;
+                nextLog.push({ text: `⚡ ${aiName} ACCEPTED the skip! ${p1.name}'s turn is skipped.`, type: 'info' });
+              } else {
+                nextMoveCount += 1;
+              }
+            }
+
+            if (nextMoveCount >= DRAW_MOVE_LIMIT && !nextWinner) {
+              nextWinner = 'draw';
+              nextLog.push({
+                text: `⚔️ Move limit reached (${DRAW_MOVE_LIMIT})! The match is declared a draw.`,
+                type: 'info'
+              });
+              playSound('penalty');
+            }
+
+            setBoard(nextBoard);
+            setMoveCount(nextMoveCount);
+            setP2(nextP2);
+            setWinner(nextWinner);
+            setRoundLog(nextLog);
+            setTwiceTurn(nextTwiceTurn);
+            setMoveHistory(nextHistory);
+            setSlidingMove(null);
+
+            setAiThinking(false);
+            aiThinkingRef.current = false;
+          }, 340);
         } else {
           nextP2.penaltyCount += 1;
           playSound('penalty');
           nextLog.push({
-            text: `⚠️ CyberAI played an illegal move! Penalty +1. [Total: ${nextP2.penaltyCount}/2]`,
+            text: `⚠️ ${aiName} played an illegal move! Penalty +1. [Total: ${nextP2.penaltyCount}/2]`,
             type: 'warn'
           });
 
@@ -137,45 +224,46 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
             nextTwiceTurn = 'X';
             nextP2.penaltyCount = 0;
             nextLog.push({
-              text: `🚨 PENALTY MAXED! You hold the option to skip CyberAI's next turn!`,
+              text: `🚨 PENALTY MAXED! You hold the option to skip ${aiName}'s next turn!`,
               type: 'danger'
             });
           }
 
           nextMoveCount += 1;
+
+          // Check Draw limit
+          if (nextMoveCount >= DRAW_MOVE_LIMIT && !nextWinner) {
+            nextWinner = 'draw';
+            nextLog.push({
+              text: `⚔️ Move limit reached (${DRAW_MOVE_LIMIT})! The match is declared a draw.`,
+              type: 'info'
+            });
+            playSound('penalty');
+          }
+
+          setBoard(nextBoard);
+          setMoveCount(nextMoveCount);
+          setP2(nextP2);
+          setWinner(nextWinner);
+          setRoundLog(nextLog);
+          setTwiceTurn(nextTwiceTurn);
+
+          setAiThinking(false);
+          aiThinkingRef.current = false;
         }
       }
-
-      // Check Draw limit
-      if (nextMoveCount >= DRAW_MOVE_LIMIT && !nextWinner) {
-        nextWinner = 'draw';
-        nextLog.push({
-          text: `⚔️ Move limit reached (${DRAW_MOVE_LIMIT})! The match is declared a draw.`,
-          type: 'info'
-        });
-        playSound('penalty');
-      }
-
-      setBoard(nextBoard);
-      setMoveCount(nextMoveCount);
-      setP2(nextP2);
-      setWinner(nextWinner);
-      setRoundLog(nextLog);
-      setTwiceTurn(nextTwiceTurn);
-
-      setAiThinking(false);
-      aiThinkingRef.current = false;
-    }, 600);
+    }, 550);
 
     return () => {
       cancelled = true;
       clearTimeout(aiTimer);
+      if (slideTimer) clearTimeout(slideTimer);
     };
-  }, [gameMode, board, moveCount, winner, activeMark, p1, p2, twiceTurn, roundLog, playSound]);
+  }, [gameMode, board, moveCount, winner, activeMark, p1, p2, twiceTurn, roundLog, moveHistory, aiDifficulty, playSound]);
 
   // Human player cell interaction
   const handleCellClick = useCallback((index) => {
-    if (winner) return;
+    if (winner || slidingMove || aiThinking) return;
 
     if (gameMode === 'vs-online') {
       if (onlineRole === 'host' && activeMark === 'O') return;
@@ -203,7 +291,23 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
       playSound('click');
       nextLog.push({ text: `${activePlayer.name} placed ${activeMark} at ${getCoordLabel(index)}.`, type: activeMark.toLowerCase() });
 
-      if (checkWin(nextBoard, activeMark)) {
+      const isWin = checkWin(nextBoard, activeMark);
+      const nextHistory = [
+        ...moveHistory,
+        {
+          type: 'place',
+          mark: activeMark,
+          from: null,
+          to: index,
+          boardBefore: [...board],
+          boardAfter: [...nextBoard],
+          playerName: activePlayer.name,
+          moveNumber: nextMoveCount + 1,
+          isWinningMove: isWin
+        }
+      ];
+
+      if (isWin) {
         nextWinner = activeMark;
         playSound('win');
         nextLog.push({ text: `🏆 ${activePlayer.name} has won the game!`, type: 'success' });
@@ -224,9 +328,10 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
       setMoveCount(nextMoveCount);
       setWinner(nextWinner);
       setRoundLog(nextLog);
+      setMoveHistory(nextHistory);
 
       if (onSyncState) {
-        onSyncState(nextBoard, nextMoveCount, p1, p2, nextTwiceTurn, nextWinner, nextLog);
+        onSyncState(nextBoard, nextMoveCount, p1, p2, nextTwiceTurn, nextWinner, nextLog, nextHistory);
       }
     }
     // PHASE 2: Advanced Movement
@@ -257,46 +362,74 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
           const valid = isValidMove(board, selectedPieceIndex, index);
 
           if (valid) {
-            nextBoard[index] = activeMark;
-            nextBoard[selectedPieceIndex] = null;
+            const from = selectedPieceIndex;
+            const to = index;
+            nextBoard[to] = activeMark;
+            nextBoard[from] = null;
+
             playSound('move');
             nextLog.push({
-              text: `${activePlayer.name} moved piece from ${getCoordLabel(selectedPieceIndex)} to ${getCoordLabel(index)}.`,
+              text: `${activePlayer.name} moved piece from ${getCoordLabel(from)} to ${getCoordLabel(to)}.`,
               type: activeMark.toLowerCase()
             });
 
-            if (checkWin(nextBoard, activeMark)) {
-              nextWinner = activeMark;
-              playSound('win');
-              nextLog.push({ text: `🏆 ${activePlayer.name} has won the game!`, type: 'success' });
-
-              setBoard(nextBoard);
-              setMoveCount(nextMoveCount + 1);
-              setWinner(nextWinner);
-              setRoundLog(nextLog);
-              setSelectedPieceIndex(null);
-              if (onSyncState) {
-                onSyncState(nextBoard, nextMoveCount + 1, p1, p2, nextTwiceTurn, nextWinner, nextLog);
+            const isWin = checkWin(nextBoard, activeMark);
+            const nextHistory = [
+              ...moveHistory,
+              {
+                type: 'move',
+                mark: activeMark,
+                from,
+                to,
+                boardBefore: [...board],
+                boardAfter: [...nextBoard],
+                playerName: activePlayer.name,
+                moveNumber: nextMoveCount + 1,
+                isWinningMove: isWin
               }
-              return;
-            }
+            ];
 
-            nextMoveCount += 1;
+            // Trigger sliding piece animation
+            setSlidingMove({ from, to, mark: activeMark });
             setSelectedPieceIndex(null);
 
-            if (nextMoveCount >= DRAW_MOVE_LIMIT && !nextWinner) {
-              nextWinner = 'draw';
-              nextLog.push({ text: `⚔️ Move limit reached (${DRAW_MOVE_LIMIT})! The match is declared a draw.`, type: 'info' });
-              playSound('penalty');
-            }
+            setTimeout(() => {
+              if (isWin) {
+                nextWinner = activeMark;
+                playSound('win');
+                nextLog.push({ text: `🏆 ${activePlayer.name} has won the game!`, type: 'success' });
 
-            setBoard(nextBoard);
-            setMoveCount(nextMoveCount);
-            setWinner(nextWinner);
-            setRoundLog(nextLog);
-            if (onSyncState) {
-              onSyncState(nextBoard, nextMoveCount, p1, p2, nextTwiceTurn, nextWinner, nextLog);
-            }
+                setBoard(nextBoard);
+                setMoveCount(nextMoveCount + 1);
+                setWinner(nextWinner);
+                setRoundLog(nextLog);
+                setMoveHistory(nextHistory);
+                setSlidingMove(null);
+                if (onSyncState) {
+                  onSyncState(nextBoard, nextMoveCount + 1, p1, p2, nextTwiceTurn, nextWinner, nextLog, nextHistory);
+                }
+                return;
+              }
+
+              nextMoveCount += 1;
+
+              if (nextMoveCount >= DRAW_MOVE_LIMIT && !nextWinner) {
+                nextWinner = 'draw';
+                nextLog.push({ text: `⚔️ Move limit reached (${DRAW_MOVE_LIMIT})! The match is declared a draw.`, type: 'info' });
+                playSound('penalty');
+              }
+
+              setBoard(nextBoard);
+              setMoveCount(nextMoveCount);
+              setWinner(nextWinner);
+              setRoundLog(nextLog);
+              setMoveHistory(nextHistory);
+              setSlidingMove(null);
+              if (onSyncState) {
+                onSyncState(nextBoard, nextMoveCount, p1, p2, nextTwiceTurn, nextWinner, nextLog, nextHistory);
+              }
+            }, 340);
+            return;
           } else {
             // Illegal move
             if (activeMark === 'X') {
@@ -341,7 +474,7 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
             setRoundLog(nextLog);
 
             if (onSyncState) {
-              onSyncState(nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog);
+              onSyncState(nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog, moveHistory);
             }
           }
         }
@@ -349,7 +482,8 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
     }
   }, [
     winner, gameMode, onlineRole, activeMark, board, moveCount, p1, p2, twiceTurn,
-    roundLog, selectedPieceIndex, activePlayer, playSound, onSyncState
+    roundLog, moveHistory, selectedPieceIndex, activePlayer, playSound, onSyncState,
+    slidingMove, aiThinking
   ]);
 
   const handleTwiceTurnChoice = useCallback((accept) => {
@@ -370,9 +504,9 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
     setRoundLog(nextLog);
 
     if (onSyncState) {
-      onSyncState(board, nextMoveCount, p1, p2, null, winner, nextLog);
+      onSyncState(board, nextMoveCount, p1, p2, null, winner, nextLog, moveHistory);
     }
-  }, [moveCount, roundLog, activePlayer.name, playSound, onSyncState, board, p1, p2, winner]);
+  }, [moveCount, roundLog, activePlayer.name, playSound, onSyncState, board, p1, p2, winner, moveHistory]);
 
   const resetGameStates = useCallback(() => {
     setBoard(Array(9).fill(null));
@@ -380,6 +514,8 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
     setSelectedPieceIndex(null);
     setTwiceTurn(null);
     setWinner(null);
+    setMoveHistory([]);
+    setSlidingMove(null);
     setRoundLog([{ text: 'Rematch started! Phase 1: Placement.', type: 'info' }]);
     setP1((prev) => ({ ...prev, penaltyCount: 0 }));
     setP2((prev) => ({ ...prev, penaltyCount: 0 }));
@@ -405,6 +541,10 @@ export function useGameState({ gameMode, onlineRole, playSound, onSyncState }) {
     setWinner,
     roundLog,
     setRoundLog,
+    moveHistory,
+    setMoveHistory,
+    slidingMove,
+    setSlidingMove,
     statusMessage,
     aiThinking,
     activeMark,

@@ -1,4 +1,4 @@
-import { HelpCircle, LogOut, Volume2, VolumeX } from 'lucide-react';
+import { HelpCircle, LogOut, Volume2, VolumeX, Grid3X3 } from 'lucide-react';
 
 export function Header({
   gameMode,
@@ -10,26 +10,32 @@ export function Header({
   return (
     <header className="game-header">
       <div className="logo-container" onClick={onBackToMenu}>
-        <span className="logo-icon">💠</span>
-        <span className="logo-text">TIKTACMOVE</span>
+        <div className="logo-icon-box">
+          <Grid3X3 size={18} />
+        </div>
+        <div className="logo-text-group">
+          <span className="logo-text">TIKTACMOVE</span>
+        </div>
       </div>
 
       <div className="header-controls">
         <button
           className="icon-btn"
           onClick={onOpenTutorial}
-          title="How to Play Tutorial"
+          title="How to Play"
+          aria-label="Tutorial"
         >
-          <HelpCircle size={20} />
+          <HelpCircle size={18} />
         </button>
 
         {gameMode !== 'menu' && (
           <button
             className="icon-btn"
             onClick={onBackToMenu}
-            title="Quit to Menu"
+            title="Leave Match"
+            aria-label="Menu"
           >
-            <LogOut size={20} />
+            <LogOut size={18} />
           </button>
         )}
 
@@ -37,8 +43,9 @@ export function Header({
           className="icon-btn"
           onClick={onToggleSound}
           title={soundEnabled ? "Mute Sound" : "Enable Sound"}
+          aria-label="Toggle sound"
         >
-          {soundEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
+          {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
         </button>
       </div>
     </header>

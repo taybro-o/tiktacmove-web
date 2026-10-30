@@ -27,6 +27,45 @@ export function checkWin(board, mark) {
   );
 }
 
+// Returns the 3 indices that formed the winning line, or null
+export function getWinningLine(board, mark) {
+  if (!board || !mark || mark === 'draw') return null;
+  const winPatterns = [
+    [0, 1, 2], [3, 4, 5], [6, 7, 8], // Rows
+    [0, 3, 6], [1, 4, 7], [2, 5, 8], // Columns
+    [0, 4, 8], [2, 4, 6]             // Diagonals
+  ];
+  return winPatterns.find(pattern => 
+    pattern.every(index => board[index] === mark)
+  ) || null;
+}
+
+// Fallback helper to deduce a move between two board states
+export function deduceMove(prevBoard, nextBoard, activeMark, playerName, moveNumber) {
+  let from = null;
+  let to = null;
+  for (let i = 0; i < 9; i++) {
+    if (prevBoard[i] === null && nextBoard[i] !== null) {
+      to = i;
+    } else if (prevBoard[i] !== null && nextBoard[i] === null) {
+      from = i;
+    }
+  }
+  if (to === null) return null;
+  const mark = nextBoard[to] || activeMark;
+  return {
+    type: from !== null ? 'move' : 'place',
+    mark,
+    from,
+    to,
+    boardBefore: [...prevBoard],
+    boardAfter: [...nextBoard],
+    playerName: playerName || (mark === 'X' ? 'Player 1' : 'Player 2'),
+    moveNumber: moveNumber || 0,
+    isWinningMove: checkWin(nextBoard, mark)
+  };
+}
+
 // Checks if a move is valid in the Advance Phase (moveCount >= 6)
 // Returns boolean: true if valid, false if invalid
 export function isValidMove(board, fromIndex, toIndex) {

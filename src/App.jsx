@@ -10,6 +10,7 @@ import { subscribeLeaderboard, syncStatsToLeaderboard } from './services/leaderb
 import { useAudio } from './hooks/useAudio';
 import { useGameState } from './hooks/useGameState';
 import { useOnlineMultiplayer } from './hooks/useOnlineMultiplayer';
+import { useReplayAnimation } from './hooks/useReplayAnimation';
 
 // Components
 import { Header } from './components/Header';
@@ -24,6 +25,8 @@ import { OnlineLobby } from './components/Online/OnlineLobby';
 import { ChatDrawer } from './components/Online/ChatDrawer';
 import { UsernameModal } from './components/Modals/UsernameModal';
 import { TutorialModal } from './components/Modals/TutorialModal';
+import { AIDifficultyModal } from './components/Modals/AIDifficultyModal';
+import { AI_CONFIGS, AI_DIFFICULTIES } from './aiEngine';
 
 function App() {
   // ==================== USER PROFILE & LOCAL STATS ====================
@@ -37,6 +40,19 @@ function App() {
     const saved = localStorage.getItem('tiktacmove_online_stats');
     return saved ? JSON.parse(saved) : { wins: 0, losses: 0 };
   });
+
+  // ==================== AI DIFFICULTY & PROGRESSION ====================
+  const [beatenDifficulties, setBeatenDifficulties] = useState(() => {
+    try {
+      const saved = localStorage.getItem('tiktacmove_beaten_ai');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [aiDifficulty, setAiDifficulty] = useState('medium');
+  const [showAIDifficultyModal, setShowAIDifficultyModal] = useState(false);
+  const [justUnlockedImpossible, setJustUnlockedImpossible] = useState(false);
 
   // ==================== APP FLOW STATE ====================
   const [gameMode, setGameMode] = useState('menu'); // 'menu', 'vs-ai', 'vs-local', 'vs-online', 'setup-online'
@@ -69,7 +85,7 @@ function App() {
   // ==================== MULTIPLAYER HOOK ====================
   const handleReceiveOpponentState = useCallback((data) => {
     if (!gameStateRef.current) return;
-    const { setBoard, setMoveCount, setP1, setP2, setTwiceTurn, setWinner, setRoundLog } = gameStateRef.current;
+    const { setBoard, setMoveCount, setP1, setP2, setTwiceTurn, setWinner, setRoundLog, setMoveHistory } = gameStateRef.current;
 
     setBoard(data.board);
     setMoveCount(data.moveCount);
@@ -78,6 +94,9 @@ function App() {
     setTwiceTurn(data.twiceTurn);
     setWinner(data.winner);
     setRoundLog(data.roundLog);
+    if (data.moveHistory && setMoveHistory) {
+      setMoveHistory(data.moveHistory);
+    }
 
     if (gameModeRef.current === 'setup-online') {
       setGameMode('vs-online');
@@ -95,7 +114,7 @@ function App() {
 
   const handleConnected = useCallback(({ p1Name, p2Name, initLog }) => {
     if (!gameStateRef.current) return;
-    const { setBoard, setMoveCount, setP1, setP2, setTwiceTurn, setWinner, setRoundLog } = gameStateRef.current;
+    const { setBoard, setMoveCount, setP1, setP2, setTwiceTurn, setWinner, setRoundLog, setMoveHistory } = gameStateRef.current;
 
     setBoard(Array(9).fill(null));
     setMoveCount(0);
@@ -104,6 +123,7 @@ function App() {
     setTwiceTurn(null);
     setWinner(null);
     setRoundLog(initLog);
+    if (setMoveHistory) setMoveHistory([]);
     setGameMode('vs-online');
   }, []);
 
@@ -139,7 +159,7 @@ function App() {
   });
 
   // State sync to Firebase relay
-  const handleSyncState = useCallback((nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog) => {
+  const handleSyncState = useCallback((nextBoard, nextMoveCount, nextP1, nextP2, nextTwiceTurn, nextWinner, nextLog, nextMoveHistory) => {
     if (gameModeRef.current === 'vs-online' && gameId) {
       syncGameState(gameId, {
         board: nextBoard,
@@ -149,6 +169,7 @@ function App() {
         twiceTurn: nextTwiceTurn,
         winner: nextWinner,
         roundLog: nextLog,
+        moveHistory: nextMoveHistory,
         role: onlineRole
       });
     }
@@ -171,6 +192,9 @@ function App() {
     setWinner,
     roundLog,
     setRoundLog,
+    moveHistory,
+    setMoveHistory,
+    slidingMove,
     statusMessage,
     activeMark,
     handleCellClick,
@@ -180,7 +204,15 @@ function App() {
     gameMode,
     onlineRole,
     playSound,
-    onSyncState: handleSyncState
+    onSyncState: handleSyncState,
+    aiDifficulty
+  });
+
+  // Replay animation hook for end of match
+  const replayState = useReplayAnimation({
+    winner,
+    board,
+    moveHistory
   });
 
   // Keep ref up to date for multiplayer callbacks
@@ -193,9 +225,10 @@ function App() {
       setTwiceTurn,
       setWinner,
       setRoundLog,
+      setMoveHistory,
       resetGameStates
     };
-  }, [setBoard, setMoveCount, setP1, setP2, setTwiceTurn, setWinner, setRoundLog, resetGameStates]);
+  }, [setBoard, setMoveCount, setP1, setP2, setTwiceTurn, setWinner, setRoundLog, setMoveHistory, resetGameStates]);
 
   // ==================== OUTCOME STATS TRACKING ====================
   useEffect(() => {
@@ -220,6 +253,29 @@ function App() {
     }
   }, [winner, gameMode, onlineRole, username]);
 
+  // ==================== AI VICTORY & PROGRESSION ====================
+  useEffect(() => {
+    if (winner === 'X' && gameMode === 'vs-ai') {
+      queueMicrotask(() => {
+        setBeatenDifficulties((prev) => {
+          if (!prev.includes(aiDifficulty)) {
+            const updated = [...prev, aiDifficulty];
+            localStorage.setItem('tiktacmove_beaten_ai', JSON.stringify(updated));
+            const base3 = [AI_DIFFICULTIES.EASY, AI_DIFFICULTIES.MEDIUM, AI_DIFFICULTIES.HARD];
+            const wasUnlocked = base3.every(d => prev.includes(d));
+            const nowUnlocked = base3.every(d => updated.includes(d));
+            if (!wasUnlocked && nowUnlocked) {
+              setJustUnlockedImpossible(true);
+              playSound('win');
+            }
+            return updated;
+          }
+          return prev;
+        });
+      });
+    }
+  }, [winner, gameMode, aiDifficulty, playSound]);
+
   // ==================== LEADERBOARD SUBSCRIPTION ====================
   const fetchLeaderboard = useCallback(() => {
     return subscribeLeaderboard(
@@ -243,14 +299,18 @@ function App() {
   }, [fetchLeaderboard]);
 
   // ==================== MODE SWITCHING & GAME CONTROL ====================
-  const startAIGame = useCallback(() => {
+  const startAIGame = useCallback((diff = aiDifficulty) => {
+    const config = AI_CONFIGS[diff] || AI_CONFIGS.medium;
+    setAiDifficulty(diff);
+    setJustUnlockedImpossible(false);
     playSound('click');
     resetGameStates();
     setP1({ name: username || 'You', mark: 'X', penaltyCount: 0 });
-    setP2({ name: 'CyberAI', mark: 'O', penaltyCount: 0 });
-    setRoundLog([{ text: 'VS AI Game started! Defeat the CyberAI.', type: 'info' }]);
+    setP2({ name: config.name, mark: 'O', penaltyCount: 0 });
+    setRoundLog([{ text: `VS ${config.name} (${config.title}) started! ${config.flavor}`, type: 'info' }]);
     setGameMode('vs-ai');
-  }, [playSound, resetGameStates, setP1, setP2, setRoundLog, username]);
+    setShowAIDifficultyModal(false);
+  }, [playSound, resetGameStates, setP1, setP2, setRoundLog, username, aiDifficulty]);
 
   const startLocalGame = useCallback(() => {
     playSound('click');
@@ -265,6 +325,7 @@ function App() {
     playSound('click');
     disconnectOnline();
     resetGameStates();
+    setJustUnlockedImpossible(false);
     setGameMode('menu');
   }, [playSound, disconnectOnline, resetGameStates]);
 
@@ -272,10 +333,16 @@ function App() {
     playSound('click');
     resetGameStates();
     hasPostedStatsRef.current = false;
-    if (gameMode === 'vs-online') {
+    setJustUnlockedImpossible(false);
+    if (gameMode === 'vs-ai') {
+      const config = AI_CONFIGS[aiDifficulty] || AI_CONFIGS.medium;
+      setP1({ name: username || 'You', mark: 'X', penaltyCount: 0 });
+      setP2({ name: config.name, mark: 'O', penaltyCount: 0 });
+      setRoundLog([{ text: `Rematch with ${config.name} (${config.title}) started!`, type: 'info' }]);
+    } else if (gameMode === 'vs-online') {
       handlePlayAgainOnline();
     }
-  }, [playSound, resetGameStates, gameMode, handlePlayAgainOnline]);
+  }, [playSound, resetGameStates, gameMode, handlePlayAgainOnline, aiDifficulty, username, setP1, setP2, setRoundLog]);
 
   return (
     <div className="app-container animate-fade-in">
@@ -310,15 +377,30 @@ function App() {
         />
       )}
 
+      {showAIDifficultyModal && (
+        <AIDifficultyModal
+          beatenDifficulties={beatenDifficulties}
+          onSelectDifficulty={(selectedDiff) => {
+            startAIGame(selectedDiff);
+          }}
+          onClose={() => setShowAIDifficultyModal(false)}
+          playSound={playSound}
+        />
+      )}
+
       {/* View 1: Main Menu */}
       {gameMode === 'menu' && (
         <MainMenu
           username={username}
+          beatenDifficulties={beatenDifficulties}
           onEditUsername={() => {
             playSound('click');
             setShowUsernamePrompt(true);
           }}
-          onStartAIGame={startAIGame}
+          onStartAIGame={() => {
+            playSound('click');
+            setShowAIDifficultyModal(true);
+          }}
           onStartOnlineSetup={() => {
             playSound('click');
             setLoadingLeaderboard(true);
@@ -360,17 +442,34 @@ function App() {
             <StatusBanner statusMessage={statusMessage} activeMark={activeMark} />
 
             <GameBoard
-              board={board}
+              board={replayState.isReplayActive ? replayState.displayBoard : board}
               activeMark={activeMark}
               selectedPieceIndex={selectedPieceIndex}
               onCellClick={handleCellClick}
+              replayHighlights={replayState.isReplayActive ? replayState.highlights : null}
+              slidingMove={replayState.isReplayActive ? replayState.slidingMove : slidingMove}
             />
 
-            <div style={{ display: 'flex', gap: '1rem', width: '100%', maxWidth: '420px' }}>
-              <button className="btn btn-secondary" onClick={handlePlayAgain} style={{ flex: 1 }}>
-                <RotateCcw size={16} /> Reset Match
-              </button>
-            </div>
+            {winner ? (
+              <GameOverModal
+                winner={winner}
+                p1Name={p1.name}
+                p2Name={p2.name}
+                gameMode={gameMode}
+                aiDifficulty={aiDifficulty}
+                justUnlockedImpossible={justUnlockedImpossible}
+                replayState={replayState}
+                onPlayAgain={handlePlayAgain}
+                onBackToMenu={handleBackToMenu}
+                onChangeDifficulty={() => setShowAIDifficultyModal(true)}
+              />
+            ) : (
+              <div style={{ display: 'flex', gap: '1rem', width: '100%', maxWidth: '420px' }}>
+                <button className="btn btn-secondary" onClick={handlePlayAgain} style={{ flex: 1 }}>
+                  <RotateCcw size={16} /> Reset Match
+                </button>
+              </div>
+            )}
           </section>
 
           {/* Right Sidebar: Scores, Log, and Chat */}
@@ -389,16 +488,6 @@ function App() {
       {/* In-Game Modals */}
       {showTwiceTurnPrompt && (
         <TwiceTurnModal onChoice={handleTwiceTurnChoice} />
-      )}
-
-      {winner && (
-        <GameOverModal
-          winner={winner}
-          p1Name={p1.name}
-          p2Name={p2.name}
-          onPlayAgain={handlePlayAgain}
-          onBackToMenu={handleBackToMenu}
-        />
       )}
     </div>
   );

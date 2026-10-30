@@ -6,10 +6,11 @@ import { checkWin } from '../gameLogic';
 /**
  * Pushes game state update to Firebase for opponent synchronization.
  */
-export async function syncGameState(gameId, { board, moveCount, p1, p2, twiceTurn, winner, roundLog, role }) {
+export async function syncGameState(gameId, { board, moveCount, p1, p2, twiceTurn, winner, roundLog, moveHistory, role }) {
   if (!gameId) return;
   const writeBoard = boardToFirebase(board);
   const writeLog = Array.isArray(roundLog) ? [...roundLog] : [];
+  const writeHistory = Array.isArray(moveHistory) ? moveHistory.slice(-20) : [];
 
   return set(ref(db, `games/${gameId}/state`), {
     board: writeBoard,
@@ -19,6 +20,7 @@ export async function syncGameState(gameId, { board, moveCount, p1, p2, twiceTur
     twiceTurn: twiceTurn ?? null,
     winner: winner || null,
     roundLog: writeLog,
+    moveHistory: writeHistory,
     lastMoveByRole: role,
     timestamp: Date.now()
   }).catch((e) => console.error("Firebase sync error:", e));
@@ -60,7 +62,8 @@ export function subscribeToGame(gameId, myRole, { onStateUpdate, onChatMessage, 
       p2: data.p2 || { name: 'Player 2', mark: 'O', penaltyCount: 0 },
       twiceTurn: data.twiceTurn || null,
       winner: verifiedWinner,
-      roundLog: Array.isArray(data.roundLog) ? data.roundLog.slice(-50) : []
+      roundLog: Array.isArray(data.roundLog) ? data.roundLog.slice(-50) : [],
+      moveHistory: Array.isArray(data.moveHistory) ? data.moveHistory : []
     });
   });
 
